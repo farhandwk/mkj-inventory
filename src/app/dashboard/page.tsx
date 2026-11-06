@@ -6,11 +6,11 @@ import { useTheme } from "next-themes"
 import { createClient } from "@/lib/supabase"
 import {
   Soup, LogOut, PieChart, Package, ListTodo,
-  Calculator, Settings, Sun, Moon, TrendingUp,
-  PackageOpen, Receipt, Crown,
+  Calculator, Settings, Sun, Moon,
   type LucideIcon,
 } from "lucide-react"
 
+import BerandaTab from "@/components/dashboard/BerandaTab"
 import SettingTab from "@/components/dashboard/SettingTab"
 import StockTab from "@/components/dashboard/StockTab"
 import OrdersTab from "@/components/dashboard/OrderTab"
@@ -28,56 +28,6 @@ const NAV_ITEMS: { id: TabType; label: string; icon: LucideIcon }[] = [
   { id: 'pesanan', label: 'Pesanan', icon: ListTodo },
   { id: 'keuangan', label: 'Keuangan', icon: Calculator },
   { id: 'setting', label: 'Setting', icon: Settings },
-]
-
-type KpiCardData = {
-  label: string
-  value: string
-  icon: LucideIcon
-  valueSize: string
-  // Class ditulis lengkap agar terdeteksi oleh Tailwind saat build
-  borderClass: string
-  textClass: string
-  iconBoxClass: string
-}
-
-const KPI_CARDS: KpiCardData[] = [
-  {
-    label: 'Total Penjualan',
-    value: 'Rp 48.500.000',
-    icon: TrendingUp,
-    valueSize: 'text-xl sm:text-2xl',
-    borderClass: 'border-l-vision-cyan',
-    textClass: 'text-vision-cyan',
-    iconBoxClass: 'bg-vision-cyan/20 text-vision-cyan',
-  },
-  {
-    label: 'Produk Terjual',
-    value: '2.450 Qty',
-    icon: PackageOpen,
-    valueSize: 'text-xl sm:text-2xl',
-    borderClass: 'border-l-vision-purple',
-    textClass: 'text-vision-purple',
-    iconBoxClass: 'bg-vision-purple/20 text-vision-purple',
-  },
-  {
-    label: 'Pesanan Selesai',
-    value: '312 Transaksi',
-    icon: Receipt,
-    valueSize: 'text-xl sm:text-2xl',
-    borderClass: 'border-l-vision-emerald',
-    textClass: 'text-vision-emerald',
-    iconBoxClass: 'bg-vision-emerald/20 text-vision-emerald',
-  },
-  {
-    label: 'Produk Terlaris',
-    value: 'Mie Telur Ayam',
-    icon: Crown,
-    valueSize: 'text-lg',
-    borderClass: 'border-l-vision-amber',
-    textClass: 'text-vision-amber',
-    iconBoxClass: 'bg-vision-amber/20 text-vision-amber',
-  },
 ]
 
 /* ========================================================================== */
@@ -112,56 +62,6 @@ function ThemeToggle({
         <Moon size={iconSize} className="text-vision-purple" />
       )}
     </button>
-  )
-}
-
-function KpiCard({ label, value, icon: Icon, valueSize, borderClass, textClass, iconBoxClass }: KpiCardData) {
-  return (
-    <div className={`vision-glass p-4 sm:p-5 rounded-2xl border-l-4 ${borderClass} relative overflow-hidden`}>
-      <div className="flex justify-between gap-3">
-        <div className="min-w-0">
-          <span className="text-xs font-bold text-muted-foreground uppercase tracking-wider">{label}</span>
-          <h3 className={`${valueSize} font-black ${textClass} mt-1 truncate`}>{value}</h3>
-        </div>
-        <div className={`w-10 h-10 shrink-0 rounded-2xl ${iconBoxClass} flex items-center justify-center`}>
-          <Icon size={20} />
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function BerandaTab() {
-  return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-
-      {/* Header Beranda */}
-      <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 vision-glass p-4 rounded-2xl">
-        <div>
-          <h2 className="text-base font-bold flex items-center gap-2">
-            <PieChart className="text-vision-cyan shrink-0" size={18} /> Dashboard Utama Beranda
-          </h2>
-          <p className="text-xs text-muted-foreground mt-0.5">
-            Ringkasan performa penjualan dan kontribusi produk secara real-time.
-          </p>
-        </div>
-      </div>
-
-      {/* KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {KPI_CARDS.map((card) => (
-          <KpiCard key={card.label} {...card} />
-        ))}
-      </div>
-
-      {/* Placeholder untuk Grafik & Tabel (Dikerjakan di milestone berikutnya) */}
-      <div className="vision-glass p-6 sm:p-12 rounded-3xl text-center border-dashed border-2 border-border/50">
-        <p className="text-muted-foreground font-medium text-sm sm:text-base">
-          Area ini akan diisi dengan integrasi Chart.js dan Tabel Data Penjualan pada milestone selanjutnya.
-        </p>
-      </div>
-
-    </div>
   )
 }
 
