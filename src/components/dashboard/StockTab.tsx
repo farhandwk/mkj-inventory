@@ -3,25 +3,25 @@
 import { useState, useEffect } from "react"
 import { 
   Boxes, ShoppingCart, CircleCheck, TriangleAlert, 
-  CircleX, TrendingUp, Clock, FileDown, X, Loader2, Send
+  CircleX, TrendingUp, Clock, FileDown, X, Loader2, Send, Check
 } from "lucide-react"
 import { createClient } from "@/lib/supabase"
 
 // --- Tipe Data ---
-type Material = {
-  id: string
-  name: string
-  monitoring_unit: string
-  safety_stock: number
-  reorder_point: number
-  price_per_unit: number
+type Material = { id: string; monitoring_unit: string; price_per_unit: number }
+type EWSParameter = {
+  material_id: string
+  material_name: string
+  safety_stock_dynamic: number
+  reorder_point_dynamic: number
+  eoq_dynamic: number
 }
-
 type Batch = {
   id: string
   material_id: string
   qty: number
-  arrival_date: string
+  order_date: string
+  arrival_date: string | null
   supplier: string
   created_at: string
 }
@@ -32,27 +32,32 @@ export default function StockTab() {
   
   // Data State
   const [materials, setMaterials] = useState<Material[]>([])
+  const [ewsParams, setEwsParams] = useState<EWSParameter[]>([])
   const [batches, setBatches] = useState<Batch[]>([])
   
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  
+  // Form Pesan Stok (Tanpa arrival_date)
   const [formStock, setFormStock] = useState({
     material_id: "",
     qty: "",
-    arrival_date: new Date().toISOString().split('T')[0],
+    order_date: new Date().toISOString().split('T')[0],
     supplier: ""
   })
 
-  // Fetch Data
+  // Fetch Data dari Tabel dan View Baru
   const fetchData = async () => {
     setIsLoading(true)
-    const [matRes, batchRes] = await Promise.all([
-      supabase.from('materials').select('*').order('created_at'),
+    const [matRes, ewsRes, batchRes] = await Promise.all([
+      supabase.from('materials').select('id, monitoring_unit, price_per_unit'),
+      supabase.from('v_ews_parameters').select('*').order('material_name'),
       supabase.from('inventory_batches').select('*').order('created_at', { ascending: false })
     ])
 
     if (matRes.data) setMaterials(matRes.data)
+    if (ewsRes.data) setEwsParams(ewsRes.data)
     if (batchRes.data) setBatches(batchRes.data)
     setIsLoading(false)
   }
@@ -70,53 +75,83 @@ export default function StockTab() {
     const { error } = await supabase.from('inventory_batches').insert({
       material_id: formStock.material_id,
       qty: parseFloat(formStock.qty),
-      arrival_date: formStock.arrival_date,
-      supplier: formStock.supplier
+      order_date: formStock.order_date,
+      supplier: formStock.supplier,
+      arrival_date: null // Dikosongkan karena barang masih di jalan
     })
 
     setIsSubmitting(false)
     if (error) {
       alert(`Gagal menyimpan: ${error.message}`)
     } else {
-      alert("Pesanan Stok Berhasil Dicatat!")
       setIsModalOpen(false)
       setFormStock({ ...formStock, qty: "", supplier: "" })
-      fetchData() // Refresh EWS
+      fetchData() // Refresh Data
     }
   }
 
-  // Kalkulasi EWS (Early Warning System)
-  const ewsData = materials.map(mat => {
-    const matBatches = batches.filter(b => b.material_id === mat.id)
-    const currentStock = matBatches.reduce((sum, b) => sum + b.qty, 0)
+  // Fungsi Tandai Barang Diterima
+  const handleMarkArrived = async (batchId: string) => {
+    const today = new Date().toISOString().split('T')[0]
+    const { error } = await supabase
+      .from('inventory_batches')
+      .update({ arrival_date: today })
+      .eq('id', batchId)
+
+    if (error) alert(`Gagal update: ${error.message}`)
+    else fetchData()
+  }
+
+  // Kalkulasi EWS berdasarkan View Dinamis & Inventory Position (IP)
+  const ewsData = ewsParams.map(param => {
+    const mat = materials.find(m => m.id === param.material_id)
+    
+    // Stok Fisik (Sudah Tiba)
+    const arrivedBatches = batches.filter(b => b.material_id === param.material_id && b.arrival_date !== null)
+    const onHand = arrivedBatches.reduce((sum, b) => sum + b.qty, 0)
+    
+    // Stok Perjalanan (Outstanding Order)
+    const outstandingBatches = batches.filter(b => b.material_id === param.material_id && b.arrival_date === null)
+    const outstanding = outstandingBatches.reduce((sum, b) => sum + b.qty, 0)
+    
+    // Inventory Position = Fisik + Perjalanan
+    const inventoryPosition = onHand + outstanding
     
     let status = "Aman"
     let statusColor = "text-vision-emerald bg-vision-emerald/20 border-vision-emerald/30"
     let Icon = CircleCheck
 
-    if (currentStock <= mat.safety_stock) {
+    if (inventoryPosition <= param.safety_stock_dynamic) {
       status = "Kritis (<= SS)"
       statusColor = "text-vision-rose bg-vision-rose/20 border-vision-rose/30 animate-pulse"
       Icon = CircleX
-    } else if (currentStock <= mat.reorder_point) {
+    } else if (inventoryPosition <= param.reorder_point_dynamic) {
       status = "Perlu Reorder"
       statusColor = "text-vision-amber bg-vision-amber/20 border-vision-amber/30"
       Icon = TriangleAlert
     }
 
-    // Saran Order (Formula Sederhana: Kembalikan ke ROP + SS)
-    const suggestedOrder = Math.max(0, mat.reorder_point - currentStock + mat.safety_stock)
-
-    return { ...mat, currentStock, status, statusColor, Icon, suggestedOrder, matBatches }
+    return { 
+      ...param, 
+      mat, 
+      onHand, 
+      outstanding, 
+      inventoryPosition, 
+      status, 
+      statusColor, 
+      Icon, 
+      arrivedBatches 
+    }
   })
 
-  // Hitung Agregat untuk KPI Cards
+  // Agregat untuk KPI
   const countAman = ewsData.filter(d => d.status === "Aman").length
   const countReorder = ewsData.filter(d => d.status === "Perlu Reorder").length
   const countKritis = ewsData.filter(d => d.status.includes("Kritis")).length
 
-  // Hitung Estimasi Biaya di Modal
+  // Helper Form Estimasi
   const selectedMat = materials.find(m => m.id === formStock.material_id)
+  const selectedEWS = ewsParams.find(e => e.material_id === formStock.material_id)
   const estimasiBiaya = selectedMat ? (parseFloat(formStock.qty || "0") * selectedMat.price_per_unit) : 0
 
   const formatRp = (val: number) => "Rp " + Math.round(val).toLocaleString('id-ID')
@@ -125,7 +160,7 @@ export default function StockTab() {
     return (
       <div className="flex flex-col items-center justify-center h-[60vh] space-y-4 text-vision-cyan">
         <Loader2 className="w-10 h-10 animate-spin" />
-        <p className="font-bold animate-pulse">Menghitung Kalkulasi EWS & Stok...</p>
+        <p className="font-bold animate-pulse">Menghitung Rolling Window & EWS Dinamis...</p>
       </div>
     )
   }
@@ -143,7 +178,7 @@ export default function StockTab() {
             <h2 className="text-xl font-black text-foreground flex items-center gap-2">
               Manajemen Stok & Early Warning System
             </h2>
-            <p className="text-xs text-muted-foreground mt-0.5">UMKM Mie Kurnia Jaya &bull; Pengelolaan Pesan Stok & Monitoring EWS</p>
+            <p className="text-xs text-muted-foreground mt-0.5">Pendekatan Rolling Window, Lead Time Dinamis & Inventory Position (IP)</p>
           </div>
         </div>
 
@@ -161,14 +196,14 @@ export default function StockTab() {
         <div className="vision-glass p-5 rounded-2xl border-l-4 border-l-vision-emerald relative overflow-hidden">
           <div className="flex justify-between">
             <div>
-              <span className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Stok Aman</span>
+              <span className="text-xs font-bold text-muted-foreground uppercase tracking-wider">IP Aman</span>
               <h3 className="text-2xl font-black text-vision-emerald mt-1">{countAman} Bahan</h3>
             </div>
             <div className="w-10 h-10 rounded-2xl bg-vision-emerald/20 text-vision-emerald flex items-center justify-center">
               <CircleCheck size={20} />
             </div>
           </div>
-          <p className="text-[11px] text-muted-foreground mt-2">Persediaan di atas Reorder Point (ROP)</p>
+          <p className="text-[11px] text-muted-foreground mt-2">Inventory Position &gt; ROP</p>
         </div>
 
         <div className="vision-glass p-5 rounded-2xl border-l-4 border-l-vision-amber relative overflow-hidden">
@@ -194,7 +229,7 @@ export default function StockTab() {
               <CircleX size={20} className="animate-pulse" />
             </div>
           </div>
-          <p className="text-[11px] text-muted-foreground mt-2">Stok menyentuh/di bawah Safety Stock (SS)</p>
+          <p className="text-[11px] text-muted-foreground mt-2">IP menyentuh Safety Stock Dinamis</p>
         </div>
       </div>
 
@@ -203,9 +238,9 @@ export default function StockTab() {
         <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-border pb-4 gap-2">
           <div>
             <h3 className="text-base font-bold text-foreground flex items-center gap-2">
-              <TrendingUp className="text-vision-cyan" size={18} /> Monitoring Stok & Umur Stock
+              <TrendingUp className="text-vision-cyan" size={18} /> Monitoring Stok (Inventory Position)
             </h3>
-            <p className="text-xs text-muted-foreground mt-0.5">Rincian persediaan bahan baku beserta indikator EWS secara Real-Time.</p>
+            <p className="text-xs text-muted-foreground mt-0.5">Mempertimbangkan stok fisik (On-Hand) dan barang yang masih di perjalanan (Outstanding).</p>
           </div>
           <div className="text-xs text-muted-foreground flex items-center gap-2">
             <span className="inline-block w-2.5 h-2.5 rounded-full bg-vision-emerald animate-pulse"></span> Live Data
@@ -217,32 +252,44 @@ export default function StockTab() {
             <thead className="text-muted-foreground border-b border-border uppercase tracking-wider">
               <tr>
                 <th className="pb-3 px-3 font-semibold text-left w-[15%]">Bahan Baku</th>
-                <th className="pb-3 px-3 font-semibold text-center w-[12%]">Stok Aktif</th>
-                <th className="pb-3 px-3 font-semibold text-center w-[10%]">ROP</th>
-                <th className="pb-3 px-3 font-semibold text-center w-[12%]">Saran Order</th>
-                <th className="pb-3 px-3 font-semibold text-center w-[27%]">Rincian Umur Batch</th>
+                <th className="pb-3 px-3 font-semibold text-center w-[15%]">Inventory Position (IP)</th>
+                <th className="pb-3 px-3 font-semibold text-center w-[12%]">Dynamic ROP</th>
+                <th className="pb-3 px-3 font-semibold text-center w-[10%]">Dynamic SS</th>
+                <th className="pb-3 px-3 font-semibold text-center w-[25%]">Umur Batch (Fisik)</th>
                 <th className="pb-3 px-3 font-semibold text-center w-[15%]">Indikator EWS</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/50 text-foreground">
               {ewsData.map(item => (
-                <tr key={item.id} className="hover:bg-muted/20 transition-colors">
-                  <td className="py-3 px-3 font-bold text-left">{item.name}</td>
-                  <td className="py-3 px-3 font-extrabold text-vision-cyan text-center">{item.currentStock.toLocaleString('id-ID')} {item.monitoring_unit}</td>
-                  <td className="py-3 px-3 font-semibold text-muted-foreground text-center">{item.reorder_point.toLocaleString('id-ID')} {item.monitoring_unit}</td>
-                  <td className="py-3 px-3 font-bold text-vision-purple text-center">{item.suggestedOrder.toLocaleString('id-ID')} {item.monitoring_unit}</td>
+                <tr key={item.material_id} className="hover:bg-muted/20 transition-colors">
+                  <td className="py-3 px-3 font-bold text-left">{item.material_name}</td>
                   
-                  {/* Umur Batch */}
+                  {/* Inventory Position Breakdown */}
+                  <td className="py-3 px-3 text-center">
+                    <div className="font-extrabold text-vision-cyan">
+                      {item.inventoryPosition.toLocaleString('id-ID')} {item.mat?.monitoring_unit}
+                    </div>
+                    <div className="text-[10px] text-muted-foreground mt-0.5">
+                      Fisik: {item.onHand} | <span className={item.outstanding > 0 ? 'text-vision-amber font-bold' : ''}>Di Jalan: {item.outstanding}</span>
+                    </div>
+                  </td>
+
+                  <td className="py-3 px-3 font-semibold text-muted-foreground text-center">
+                    {item.reorder_point_dynamic.toLocaleString('id-ID')} {item.mat?.monitoring_unit}
+                  </td>
+                  <td className="py-3 px-3 font-semibold text-muted-foreground text-center">
+                    {item.safety_stock_dynamic.toLocaleString('id-ID')} {item.mat?.monitoring_unit}
+                  </td>
+                  
+                  {/* Umur Batch Fisik Saja */}
                   <td className="py-3 px-3">
                     <div className="space-y-1.5 py-1 max-w-[260px] mx-auto">
-                      {item.matBatches.length === 0 ? (
-                        <span className="text-muted-foreground italic text-center block">Stok Kosong</span>
+                      {item.arrivedBatches.length === 0 ? (
+                        <span className="text-muted-foreground italic text-center block">Stok Fisik Kosong</span>
                       ) : (
-                        item.matBatches.map(b => {
-                          // Kalkulasi umur batch (hari)
-                          const diffTime = Math.abs(new Date().getTime() - new Date(b.arrival_date).getTime())
+                        item.arrivedBatches.map(b => {
+                          const diffTime = Math.abs(new Date().getTime() - new Date(b.arrival_date!).getTime())
                           const days = Math.ceil(diffTime / (1000 * 60 * 60 * 24))
-                          const proportion = Math.round((b.qty / (item.currentStock || 1)) * 100)
                           const badgeCol = days > 4 ? "bg-vision-amber/15 text-vision-amber border-vision-amber/30" : "bg-vision-cyan/15 text-vision-cyan border-vision-cyan/30"
                           
                           return (
@@ -251,8 +298,7 @@ export default function StockTab() {
                                 {days} Hari lalu
                               </span>
                               <div className="flex items-center gap-1.5">
-                                <span className="font-bold">{b.qty.toLocaleString('id-ID')} {item.monitoring_unit}</span>
-                                <span className="text-vision-cyan font-black">({proportion}%)</span>
+                                <span className="font-bold">{b.qty.toLocaleString('id-ID')} {item.mat?.monitoring_unit}</span>
                               </div>
                             </div>
                           )
@@ -278,43 +324,60 @@ export default function StockTab() {
         <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-border pb-4 gap-2">
           <div>
             <h3 className="text-base font-bold text-foreground flex items-center gap-2">
-              <Clock className="text-vision-cyan" size={18} /> Riwayat Log Kedatangan Stok
+              <Clock className="text-vision-cyan" size={18} /> Riwayat Log Pemesanan & Kedatangan
             </h3>
-            <p className="text-xs text-muted-foreground mt-0.5">Catatan kronologis penerimaan bahan baku.</p>
+            <p className="text-xs text-muted-foreground mt-0.5">Tandai pesanan sebagai diterima jika barang sudah tiba di gudang.</p>
           </div>
-          <button className="px-3.5 py-2 rounded-xl bg-vision-emerald/10 text-vision-emerald border border-vision-emerald/30 hover:bg-vision-emerald/20 text-xs font-semibold flex items-center gap-1.5 transition-all">
-            <FileDown size={14} /> Unduh CSV
-          </button>
         </div>
 
         <div className="overflow-x-auto">
           <table className="w-full text-xs border-collapse min-w-[850px]">
             <thead className="text-muted-foreground border-b border-border uppercase tracking-wider">
               <tr>
-                <th className="pb-3 px-3 font-semibold text-left">Waktu Input</th>
-                <th className="pb-3 px-3 font-semibold text-left">Tgl Kedatangan</th>
+                <th className="pb-3 px-3 font-semibold text-left">Tgl Pesan</th>
                 <th className="pb-3 px-3 font-semibold text-left">Bahan Baku</th>
                 <th className="pb-3 px-3 font-semibold text-center">Jumlah</th>
                 <th className="pb-3 px-3 font-semibold text-left">Supplier/Keterangan</th>
-                <th className="pb-3 px-3 font-semibold text-right">Estimasi Biaya</th>
+                <th className="pb-3 px-3 font-semibold text-right">Tgl Tiba</th>
+                <th className="pb-3 px-3 font-semibold text-center">Aksi / Status</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/50 text-foreground">
               {batches.map(log => {
                 const mat = materials.find(m => m.id === log.material_id)
-                const logCost = mat ? (log.qty * mat.price_per_unit) : 0
+                const isArrived = log.arrival_date !== null
+
                 return (
                   <tr key={log.id} className="hover:bg-muted/20 transition-colors">
-                    <td className="py-3 px-3 font-mono text-[10px] text-muted-foreground text-left">
-                      {new Date(log.created_at).toLocaleString('id-ID')}
-                    </td>
-                    <td className="py-3 px-3 font-bold text-vision-emerald text-left">{log.arrival_date}</td>
-                    <td className="py-3 px-3 font-bold text-left">{mat?.name || 'Unknown'}</td>
+                    <td className="py-3 px-3 font-mono text-[10px] text-muted-foreground text-left">{log.order_date}</td>
+                    <td className="py-3 px-3 font-bold text-left">{ewsParams.find(e => e.material_id === log.material_id)?.material_name || 'Unknown'}</td>
                     <td className="py-3 px-3 font-extrabold text-vision-cyan text-center">
                       {log.qty.toLocaleString('id-ID')} {mat?.monitoring_unit}
                     </td>
                     <td className="py-3 px-3 text-muted-foreground text-left">{log.supplier || '-'}</td>
-                    <td className="py-3 px-3 text-vision-amber font-bold text-right">{formatRp(logCost)}</td>
+                    
+                    <td className="py-3 px-3 font-bold text-right">
+                      {isArrived ? (
+                        <span className="text-vision-emerald">{log.arrival_date}</span>
+                      ) : (
+                        <span className="text-vision-amber animate-pulse">Menunggu...</span>
+                      )}
+                    </td>
+
+                    <td className="py-3 px-3 text-center">
+                      {isArrived ? (
+                        <span className="px-2 py-1 rounded-md bg-vision-emerald/10 text-vision-emerald font-semibold inline-flex items-center gap-1">
+                          <Check size={14} /> Diterima
+                        </span>
+                      ) : (
+                        <button 
+                          onClick={() => handleMarkArrived(log.id)}
+                          className="px-3 py-1.5 rounded-md bg-gradient-to-r from-vision-cyan to-vision-blue text-white font-bold shadow-md hover:opacity-90 inline-flex items-center gap-1"
+                        >
+                          Tandai Diterima
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 )
               })}
@@ -324,7 +387,7 @@ export default function StockTab() {
       </div>
 
       {/* ========================================= */}
-      {/* MODAL PESAN STOK (Tailwind Manual Vision) */}
+      {/* MODAL PESAN STOK */}
       {/* ========================================= */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200">
@@ -336,8 +399,8 @@ export default function StockTab() {
                   <ShoppingCart size={20} />
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-foreground">Form Pesan & Input Stok</h3>
-                  <p className="text-xs text-muted-foreground">Pencatatan kedatangan barang baru.</p>
+                  <h3 className="text-base font-bold text-foreground">Form Pesan Stok Baru</h3>
+                  <p className="text-xs text-muted-foreground">Tanggal kedatangan diisi nanti saat barang tiba.</p>
                 </div>
               </div>
               <button onClick={() => setIsModalOpen(false)} className="p-2 rounded-full hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
@@ -347,23 +410,26 @@ export default function StockTab() {
 
             <form onSubmit={handleStockIn} className="space-y-4 text-xs">
               <div className="space-y-1.5">
-                <label className="font-semibold text-foreground">Bahan Baku</label>
+                <label className="font-semibold text-foreground flex justify-between">
+                  <span>Bahan Baku</span>
+                  {selectedEWS && <span className="text-vision-cyan">Rekomendasi EOQ: {selectedEWS.eoq_dynamic} {selectedMat?.monitoring_unit}</span>}
+                </label>
                 <select 
                   required 
                   value={formStock.material_id}
-                  onChange={e => setFormStock({...formStock, material_id: e.target.value})}
+                  onChange={e => setFormStock({...formStock, material_id: e.target.value, qty: ewsParams.find(x => x.material_id === e.target.value)?.eoq_dynamic.toString() || ""})}
                   className="w-full px-4 py-3 rounded-xl bg-background border border-border text-foreground font-semibold focus:border-vision-cyan outline-none"
                 >
                   <option value="" disabled>-- Pilih Bahan Baku --</option>
-                  {materials.map(m => (
-                    <option key={m.id} value={m.id}>{m.name} ({m.monitoring_unit})</option>
+                  {ewsParams.map(m => (
+                    <option key={m.material_id} value={m.material_id}>{m.material_name} ({materials.find(x => x.id === m.material_id)?.monitoring_unit})</option>
                   ))}
                 </select>
               </div>
 
               <div className="space-y-1.5">
                 <label className="font-semibold text-foreground flex justify-between">
-                  <span>Jumlah Masuk</span>
+                  <span>Jumlah Dipesan</span>
                   {selectedMat && <span className="text-muted-foreground">Satuan: {selectedMat.monitoring_unit}</span>}
                 </label>
                 <input 
@@ -387,16 +453,16 @@ export default function StockTab() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
-                  <label className="font-semibold text-foreground">Tanggal Kedatangan</label>
+                  <label className="font-semibold text-foreground">Tanggal Pesan</label>
                   <input 
                     type="date" required 
-                    value={formStock.arrival_date}
-                    onChange={e => setFormStock({...formStock, arrival_date: e.target.value})}
+                    value={formStock.order_date}
+                    onChange={e => setFormStock({...formStock, order_date: e.target.value})}
                     className="w-full px-4 py-3 rounded-xl bg-background border border-border text-foreground focus:border-vision-cyan outline-none" 
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <label className="font-semibold text-foreground">Supplier/Keterangan</label>
+                  <label className="font-semibold text-foreground">Supplier Tujuan</label>
                   <input 
                     type="text" required placeholder="Contoh: PT Segitiga"
                     value={formStock.supplier}
@@ -412,7 +478,7 @@ export default function StockTab() {
                 </button>
                 <button disabled={isSubmitting} type="submit" className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-vision-cyan to-vision-blue text-white font-extrabold flex items-center gap-2 shadow-glow-cyan hover:opacity-90 disabled:opacity-50">
                   {isSubmitting ? <Loader2 size={16} className="animate-spin"/> : <Send size={16}/>}
-                  Simpan Stok Masuk
+                  Kirim Pesanan
                 </button>
               </div>
             </form>

@@ -13,6 +13,8 @@ import {
 
 import SettingTab from "@/components/dashboard/SettingTab"
 import StockTab from "@/components/dashboard/StockTab"
+import OrdersTab from "@/components/dashboard/OrderTab"
+import FinanceTab from "@/components/dashboard/FinanceTab"
 
 /* ========================================================================== */
 /* TYPES & DATA                                                               */
@@ -294,6 +296,8 @@ export default function DashboardPage() {
         {activeTab === 'beranda' && <BerandaTab />}
         {activeTab === 'setting' && <SettingTab />}
         {activeTab === 'stock' && <StockTab />}
+        {activeTab === 'pesanan' && <OrdersTab />}
+        {activeTab === 'keuangan' && <FinanceTab />}
       </main>
     </div>
   )
