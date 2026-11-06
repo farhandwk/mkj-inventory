@@ -11,6 +11,9 @@ import {
   type LucideIcon,
 } from "lucide-react"
 
+import SettingTab from "@/components/dashboard/SettingTab"
+import StockTab from "@/components/dashboard/StockTab"
+
 /* ========================================================================== */
 /* TYPES & DATA                                                               */
 /* ========================================================================== */
@@ -178,12 +181,29 @@ function ModulePlaceholder({ tab }: { tab: TabType }) {
 export default function DashboardPage() {
   const [activeTab, setActiveTab] = useState<TabType>('beranda')
   const [mounted, setMounted] = useState(false)
+  const [username, setUsername] = useState<string>("Loading...")
   const router = useRouter()
   const supabase = useMemo(() => createClient(), [])
 
   useEffect(() => {
     setMounted(true)
   }, [])
+
+  useEffect(() => {
+    const fetchUserProfile = async () => {
+      const { data: {user}, error: authError } = await supabase.auth.getUser()
+
+      if (authError || !user) {
+        router.push('/login')
+        return
+      }
+
+    const displayName = user.user_metadata?.full_name
+
+    setUsername(displayName || 'User')
+    }
+    fetchUserProfile()
+  }, [supabase, router])
 
   const handleLogout = async () => {
     await supabase.auth.signOut()
@@ -208,7 +228,7 @@ export default function DashboardPage() {
             <div className="min-w-0">
               <h2 className="text-base font-black leading-none text-foreground truncate">MIE KURNIA JAYA</h2>
               <p className="text-[11px] text-muted-foreground mt-1">
-                User: <strong className="text-vision-cyan">Admin Sistem</strong>
+                User: <strong className="text-vision-cyan">{username}</strong>
               </p>
             </div>
           </div>
@@ -270,7 +290,10 @@ export default function DashboardPage() {
 
       {/* CONTAINER KONTEN MODUL */}
       <main className="w-full max-w-[1600px] mx-auto flex-1 relative z-10">
-        {activeTab === 'beranda' ? <BerandaTab /> : <ModulePlaceholder tab={activeTab} />}
+        {/* {activeTab === 'beranda' ? <BerandaTab /> : <ModulePlaceholder tab={activeTab} />} */}
+        {activeTab === 'beranda' && <BerandaTab />}
+        {activeTab === 'setting' && <SettingTab />}
+        {activeTab === 'stock' && <StockTab />}
       </main>
     </div>
   )
