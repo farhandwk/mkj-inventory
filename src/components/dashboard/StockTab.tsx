@@ -1,491 +1,999 @@
 'use client'
 
-import { useState, useEffect } from "react"
-import { 
-  Boxes, ShoppingCart, CircleCheck, TriangleAlert, 
-  CircleX, TrendingUp, Clock, FileDown, X, Loader2, Send, Check
+import { useState, useEffect, useMemo } from "react"
+import {
+  Package, CheckCircle2, XCircle, Pencil, Trash2,
+  Loader2, X, Save, History, ClipboardCheck, Layers,
+  Search, RotateCcw
 } from "lucide-react"
 import { createClient } from "@/lib/supabase"
+import ServerPagination from "@/components/ui/ServerPagination"
 
-// --- Tipe Data ---
-type Material = { id: string; monitoring_unit: string; price_per_unit: number }
-type EWSParameter = {
-  material_id: string
-  material_name: string
-  safety_stock_dynamic: number
-  reorder_point_dynamic: number
-  eoq_dynamic: number
+type VerificationStatus = 'pending' | 'approved' | 'rejected'
+
+type MaterialItem = {
+  id: string
+  name: string
+  monitoring_unit: string
 }
-type Batch = {
+
+type BatchAgeBadge = {
+  id: string
+  ageDays: number
+  remainingQty: number
+  initialQty: number
+  arrivalDate: string | null
+  orderDate: string
+}
+
+type StockMonitorRow = {
+  material_id: string
+  name: string
+  monitoring_unit: string
+  current_stock: number
+  on_hand_qty: number
+  in_transit_qty: number
+  safety_stock?: number
+  rop?: number
+  eoq?: number
+  ews_status?: string
+  batch_ages: BatchAgeBadge[]
+}
+
+type BatchRow = {
   id: string
   material_id: string
   qty: number
+  initial_qty: number
   order_date: string
   arrival_date: string | null
-  supplier: string
+  supplier: string | null
+  verification_status: VerificationStatus
   created_at: string
+  materials?: { name: string; monitoring_unit: string } | { name: string; monitoring_unit: string }[] | null
+}
+
+type TableFilterState = {
+  dateFrom: string
+  dateTo: string
+  materialId: string
+  supplierSearch: string
+}
+
+const PAGE_SIZE = 10
+
+const EMPTY_FILTER: TableFilterState = {
+  dateFrom: "",
+  dateTo: "",
+  materialId: "",
+  supplierSearch: "",
+}
+
+function getMaterialMeta(mat: BatchRow['materials']) {
+  if (!mat) return { name: '-', unit: 'Kg' }
+  const obj = Array.isArray(mat) ? mat[0] : mat
+  return {
+    name: obj?.name || '-',
+    unit: obj?.monitoring_unit || 'Kg',
+  }
+}
+
+function calculateAgeDays(dateStr: string): number {
+  const parsed = new Date(`${dateStr}T00:00:00`)
+  if (Number.isNaN(parsed.getTime())) return 0
+  const now = new Date()
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const diffMs = todayStart.getTime() - parsed.getTime()
+  return Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)))
 }
 
 export default function StockTab() {
-  const supabase = createClient()
-  const [isLoading, setIsLoading] = useState(true)
-  
-  // Data State
-  const [materials, setMaterials] = useState<Material[]>([])
-  const [ewsParams, setEwsParams] = useState<EWSParameter[]>([])
-  const [batches, setBatches] = useState<Batch[]>([])
-  
-  // Modal State
-  const [isModalOpen, setIsModalOpen] = useState(false)
-  const [isSubmitting, setIsSubmitting] = useState(false)
-  
-  // Form Pesan Stok (Tanpa arrival_date)
-  const [formStock, setFormStock] = useState({
-    material_id: "",
-    qty: "",
-    order_date: new Date().toISOString().split('T')[0],
-    supplier: ""
-  })
+  const supabase = useMemo(() => createClient(), [])
 
-  // Fetch Data dari Tabel dan View Baru
-  const fetchData = async () => {
-    setIsLoading(true)
-    const [matRes, ewsRes, batchRes] = await Promise.all([
-      supabase.from('materials').select('id, monitoring_unit, price_per_unit'),
-      supabase.from('v_ews_parameters').select('*').order('material_name'),
-      supabase.from('inventory_batches').select('*').order('created_at', { ascending: false })
+  const [materials, setMaterials] = useState<MaterialItem[]>([])
+
+  // Tabel 0: Monitoring Stock Terkini (Server-side pagination)
+  const [stockRows, setStockRows] = useState<StockMonitorRow[]>([])
+  const [stockPage, setStockPage] = useState(1)
+  const [stockTotal, setStockTotal] = useState(0)
+  const [loadingStock, setLoadingStock] = useState(true)
+
+  // Filter & State Tabel 1: Verifikasi Pesanan Stock (pending)
+  const [pendingFilter, setPendingFilter] = useState<TableFilterState>(EMPTY_FILTER)
+  const [pendingBatches, setPendingBatches] = useState<BatchRow[]>([])
+  const [pendingPage, setPendingPage] = useState(1)
+  const [pendingTotal, setPendingTotal] = useState(0)
+  const [loadingPending, setLoadingPending] = useState(true)
+
+  // Filter & State Tabel 2: Riwayat Log Pemesanan & Kedatangan
+  const [historyFilter, setHistoryFilter] = useState<TableFilterState>(EMPTY_FILTER)
+  const [historyBatches, setHistoryBatches] = useState<BatchRow[]>([])
+  const [historyPage, setHistoryPage] = useState(1)
+  const [historyTotal, setHistoryTotal] = useState(0)
+  const [loadingHistory, setLoadingHistory] = useState(true)
+
+  // Action & Modal Edit State
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [feedback, setFeedback] = useState<string | null>(null)
+  const [editingBatch, setEditingBatch] = useState<BatchRow | null>(null)
+  const [editForm, setEditForm] = useState({
+    material_id: "",
+    initial_qty: "",
+    order_date: "",
+    arrival_date: "",
+    supplier: "",
+    verification_status: "pending" as VerificationStatus,
+  })
+  const [isSavingEdit, setIsSavingEdit] = useState(false)
+
+  useEffect(() => {
+    const fetchMaterials = async () => {
+      const { data } = await supabase
+        .from('materials')
+        .select('id, name, monitoring_unit')
+        .order('name')
+      if (data) setMaterials(data)
+    }
+    fetchMaterials()
+  }, [supabase])
+
+  // Fetch Monitoring Stock Terkini + Umur Batch Fisik (sinkron dengan initial_qty & qty)
+  const fetchStockMonitor = async (targetPage = stockPage) => {
+    setLoadingStock(true)
+    const from = (targetPage - 1) * PAGE_SIZE
+    const to = from + PAGE_SIZE - 1
+
+    const { data: matData, count: matCount, error: matError } = await supabase
+      .from('materials')
+      .select('id, name, monitoring_unit', { count: 'exact' })
+      .order('name')
+      .range(from, to)
+
+    if (matError || !matData) {
+      setStockRows([])
+      setStockTotal(0)
+      setLoadingStock(false)
+      return
+    }
+
+    const ids = matData.map(m => m.id)
+
+    const [{ data: approvedBatches }, { data: ewsData, error: ewsError }] = await Promise.all([
+      supabase
+        .from('inventory_batches')
+        .select('id, material_id, qty, initial_qty, order_date, arrival_date, created_at')
+        .in('material_id', ids)
+        .eq('verification_status', 'approved')
+        .order('arrival_date', { ascending: true, nullsFirst: false })
+        .order('order_date', { ascending: true })
+        .order('created_at', { ascending: true }),
+      supabase
+        .from('v_ews_parameters')
+        .select('*')
+        .in('material_id', ids),
     ])
 
-    if (matRes.data) setMaterials(matRes.data)
-    if (ewsRes.data) setEwsParams(ewsRes.data)
-    if (batchRes.data) setBatches(batchRes.data)
-    setIsLoading(false)
+    const batchesByMaterial = new Map<string, BatchRow[]>()
+    for (const raw of (approvedBatches || []) as BatchRow[]) {
+      const list = batchesByMaterial.get(raw.material_id) || []
+      list.push(raw)
+      batchesByMaterial.set(raw.material_id, list)
+    }
+
+    const ewsMap = new Map<string, Record<string, unknown>>()
+    if (!ewsError && ewsData) {
+      for (const row of ewsData as Record<string, unknown>[]) {
+        const key = String(row.material_id ?? row.id ?? '')
+        if (key) ewsMap.set(key, row)
+      }
+    }
+
+    const pickNum = (...vals: unknown[]): number | null => {
+      for (const v of vals) {
+        if (v !== undefined && v !== null && v !== '' && !Number.isNaN(Number(v))) {
+          return Number(v)
+        }
+      }
+      return null
+    }
+
+    const mapped: StockMonitorRow[] = matData.map(m => {
+      const ews = ewsMap.get(m.id)
+      const matBatches = batchesByMaterial.get(m.id) || []
+
+      let onHandQty = 0
+      let inTransitQty = 0
+      const physicalAges: BatchAgeBadge[] = []
+
+      for (const b of matBatches) {
+        const remQty = Number(b.qty ?? 0)
+        const initQty = Number(b.initial_qty ?? b.qty ?? 0)
+
+        if (b.arrival_date) {
+          onHandQty += remQty
+          if (remQty > 0) {
+            physicalAges.push({
+              id: b.id,
+              ageDays: calculateAgeDays(b.arrival_date),
+              remainingQty: remQty,
+              initialQty: initQty,
+              arrivalDate: b.arrival_date,
+              orderDate: b.order_date,
+            })
+          }
+        } else {
+          inTransitQty += remQty
+        }
+      }
+
+      const activeStock = onHandQty + inTransitQty
+
+      return {
+        material_id: m.id,
+        name: m.name,
+        monitoring_unit: m.monitoring_unit,
+        current_stock: activeStock,
+        on_hand_qty: onHandQty,
+        in_transit_qty: inTransitQty,
+        safety_stock: pickNum(ews?.safety_stock, ews?.safety_stock_dynamic) ?? undefined,
+        rop: pickNum(ews?.rop, ews?.reorder_point_dynamic) ?? undefined,
+        eoq: pickNum(ews?.eoq, ews?.eoq_dynamic) ?? undefined,
+        ews_status: typeof ews?.ews_status === 'string' ? ews.ews_status : undefined,
+        batch_ages: physicalAges,
+      }
+    })
+
+    setStockRows(mapped)
+    setStockTotal(matCount || 0)
+    setLoadingStock(false)
+  }
+
+  // Helper membangun query terfilter untuk tabel batch
+  const buildFilteredBatchQuery = (
+    filter: TableFilterState,
+    onlyPending: boolean
+  ) => {
+    let query = supabase
+      .from('inventory_batches')
+      .select(
+        'id, material_id, qty, initial_qty, order_date, arrival_date, supplier, verification_status, created_at, materials(name, monitoring_unit)',
+        { count: 'exact' }
+      )
+
+    if (onlyPending) {
+      query = query.eq('verification_status', 'pending')
+    }
+    if (filter.dateFrom) {
+      query = query.gte('order_date', filter.dateFrom)
+    }
+    if (filter.dateTo) {
+      query = query.lte('order_date', filter.dateTo)
+    }
+    if (filter.materialId) {
+      query = query.eq('material_id', filter.materialId)
+    }
+    if (filter.supplierSearch.trim()) {
+      query = query.ilike('supplier', `%${filter.supplierSearch.trim()}%`)
+    }
+
+    return query
+  }
+
+  const fetchPendingBatches = async (
+    targetPage = pendingPage,
+    filter = pendingFilter
+  ) => {
+    setLoadingPending(true)
+    const from = (targetPage - 1) * PAGE_SIZE
+    const to = from + PAGE_SIZE - 1
+
+    const { data, count, error } = await buildFilteredBatchQuery(filter, true)
+      .order('created_at', { ascending: false })
+      .range(from, to)
+
+    if (error) {
+      alert(`Gagal memuat antrean verifikasi: ${error.message}`)
+    } else {
+      setPendingBatches((data || []) as BatchRow[])
+      setPendingTotal(count || 0)
+    }
+    setLoadingPending(false)
+  }
+
+  const fetchHistoryBatches = async (
+    targetPage = historyPage,
+    filter = historyFilter
+  ) => {
+    setLoadingHistory(true)
+    const from = (targetPage - 1) * PAGE_SIZE
+    const to = from + PAGE_SIZE - 1
+
+    const { data, count, error } = await buildFilteredBatchQuery(filter, false)
+      .order('order_date', { ascending: false })
+      .order('created_at', { ascending: false })
+      .range(from, to)
+
+    if (error) {
+      alert(`Gagal memuat riwayat log stok: ${error.message}`)
+    } else {
+      setHistoryBatches((data || []) as BatchRow[])
+      setHistoryTotal(count || 0)
+    }
+    setLoadingHistory(false)
   }
 
   useEffect(() => {
-    fetchData()
-  }, [])
+    fetchStockMonitor(stockPage)
+  }, [stockPage])
 
-  // Fungsi Submit Pesanan Stok
-  const handleStockIn = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!formStock.material_id || !formStock.qty) return alert("Pilih bahan baku dan isi jumlah!")
-    
-    setIsSubmitting(true)
-    const { error } = await supabase.from('inventory_batches').insert({
-      material_id: formStock.material_id,
-      qty: parseFloat(formStock.qty),
-      order_date: formStock.order_date,
-      supplier: formStock.supplier,
-      arrival_date: null // Dikosongkan karena barang masih di jalan
-    })
+  useEffect(() => {
+    fetchPendingBatches(pendingPage, pendingFilter)
+  }, [pendingPage, pendingFilter])
 
-    setIsSubmitting(false)
-    if (error) {
-      alert(`Gagal menyimpan: ${error.message}`)
-    } else {
-      setIsModalOpen(false)
-      setFormStock({ ...formStock, qty: "", supplier: "" })
-      fetchData() // Refresh Data
-    }
+  useEffect(() => {
+    fetchHistoryBatches(historyPage, historyFilter)
+  }, [historyPage, historyFilter])
+
+  const updatePendingFilter = (patch: Partial<TableFilterState>) => {
+    setPendingPage(1)
+    setPendingFilter(prev => ({ ...prev, ...patch }))
   }
 
-  // Fungsi Tandai Barang Diterima
-  const handleMarkArrived = async (batchId: string) => {
-    const today = new Date().toISOString().split('T')[0]
+  const updateHistoryFilter = (patch: Partial<TableFilterState>) => {
+    setHistoryPage(1)
+    setHistoryFilter(prev => ({ ...prev, ...patch }))
+  }
+
+  const refreshAll = async () => {
+    await Promise.all([
+      fetchStockMonitor(stockPage),
+      fetchPendingBatches(pendingPage, pendingFilter),
+      fetchHistoryBatches(historyPage, historyFilter),
+    ])
+  }
+
+  const handleVerifyAction = async (batchId: string, status: 'approved' | 'rejected') => {
+    setBusyId(batchId)
+    setFeedback(null)
+
     const { error } = await supabase
       .from('inventory_batches')
-      .update({ arrival_date: today })
+      .update({
+        verification_status: status,
+        verified_at: new Date().toISOString(),
+      })
       .eq('id', batchId)
 
-    if (error) alert(`Gagal update: ${error.message}`)
-    else fetchData()
+    setBusyId(null)
+
+    if (error) {
+      alert(`Gagal memverifikasi batch: ${error.message}`)
+    } else {
+      setFeedback(
+        status === 'approved'
+          ? "Pesanan stock disetujui dan masuk ke stok aktif FIFO."
+          : "Pesanan stock ditolak."
+      )
+      refreshAll()
+    }
   }
 
-  // Kalkulasi EWS berdasarkan View Dinamis & Inventory Position (IP)
-  const ewsData = ewsParams.map(param => {
-    const mat = materials.find(m => m.id === param.material_id)
-    
-    // Stok Fisik (Sudah Tiba)
-    const arrivedBatches = batches.filter(b => b.material_id === param.material_id && b.arrival_date !== null)
-    const onHand = arrivedBatches.reduce((sum, b) => sum + b.qty, 0)
-    
-    // Stok Perjalanan (Outstanding Order)
-    const outstandingBatches = batches.filter(b => b.material_id === param.material_id && b.arrival_date === null)
-    const outstanding = outstandingBatches.reduce((sum, b) => sum + b.qty, 0)
-    
-    // Inventory Position = Fisik + Perjalanan
-    const inventoryPosition = onHand + outstanding
-    
-    let status = "Aman"
-    let statusColor = "text-vision-emerald bg-vision-emerald/20 border-vision-emerald/30"
-    let Icon = CircleCheck
+  const openEditModal = (batch: BatchRow) => {
+    setEditingBatch(batch)
+    setEditForm({
+      material_id: batch.material_id,
+      initial_qty: String(batch.initial_qty ?? batch.qty),
+      order_date: batch.order_date,
+      arrival_date: batch.arrival_date || "",
+      supplier: batch.supplier || "",
+      verification_status: batch.verification_status,
+    })
+  }
 
-    if (inventoryPosition <= param.safety_stock_dynamic) {
-      status = "Kritis (<= SS)"
-      statusColor = "text-vision-rose bg-vision-rose/20 border-vision-rose/30 animate-pulse"
-      Icon = CircleX
-    } else if (inventoryPosition <= param.reorder_point_dynamic) {
-      status = "Perlu Reorder"
-      statusColor = "text-vision-amber bg-vision-amber/20 border-vision-amber/30"
-      Icon = TriangleAlert
+  const handleSaveEdit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!editingBatch) return
+
+    setIsSavingEdit(true)
+    setFeedback(null)
+
+    const { error } = await supabase.rpc('update_inventory_batch_log', {
+      p_batch_id: editingBatch.id,
+      p_material_id: editForm.material_id,
+      p_initial_qty: parseFloat(editForm.initial_qty),
+      p_order_date: editForm.order_date,
+      p_arrival_date: editForm.arrival_date || null,
+      p_supplier: editForm.supplier || null,
+      p_verification_status: editForm.verification_status,
+    })
+
+    setIsSavingEdit(false)
+
+    if (error) {
+      alert(`Gagal menyimpan perubahan log: ${error.message}`)
+    } else {
+      setEditingBatch(null)
+      setFeedback("Log pemesanan/kedatangan diperbarui dan sisa stok dihitung ulang.")
+      refreshAll()
     }
+  }
 
-    return { 
-      ...param, 
-      mat, 
-      onHand, 
-      outstanding, 
-      inventoryPosition, 
-      status, 
-      statusColor, 
-      Icon, 
-      arrivedBatches 
-    }
-  })
-
-  // Agregat untuk KPI
-  const countAman = ewsData.filter(d => d.status === "Aman").length
-  const countReorder = ewsData.filter(d => d.status === "Perlu Reorder").length
-  const countKritis = ewsData.filter(d => d.status.includes("Kritis")).length
-
-  // Helper Form Estimasi
-  const selectedMat = materials.find(m => m.id === formStock.material_id)
-  const selectedEWS = ewsParams.find(e => e.material_id === formStock.material_id)
-  const estimasiBiaya = selectedMat ? (parseFloat(formStock.qty || "0") * selectedMat.price_per_unit) : 0
-
-  const formatRp = (val: number) => "Rp " + Math.round(val).toLocaleString('id-ID')
-
-  if (isLoading) {
-    return (
-      <div className="flex flex-col items-center justify-center h-[60vh] space-y-4 text-vision-cyan">
-        <Loader2 className="w-10 h-10 animate-spin" />
-        <p className="font-bold animate-pulse">Menghitung Rolling Window & EWS Dinamis...</p>
-      </div>
+  const handleDeleteBatch = async (batch: BatchRow) => {
+    const meta = getMaterialMeta(batch.materials)
+    const ok = window.confirm(
+      `Hapus log batch ${meta.name} (${batch.initial_qty} ${meta.unit}, tgl ${batch.order_date})?`
     )
+    if (!ok) return
+
+    setBusyId(batch.id)
+    setFeedback(null)
+
+    const { error } = await supabase
+      .from('inventory_batches')
+      .delete()
+      .eq('id', batch.id)
+
+    setBusyId(null)
+
+    if (error) {
+      alert(`Gagal menghapus log: ${error.message}`)
+    } else {
+      setFeedback("Log pemesanan/kedatangan berhasil dihapus.")
+      refreshAll()
+    }
   }
+
+  const renderFilterBar = (
+    filter: TableFilterState,
+    onChange: (patch: Partial<TableFilterState>) => void,
+    onReset: () => void
+  ) => (
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 bg-background/40 p-3.5 rounded-2xl border border-border/70 text-xs">
+      <div className="space-y-1">
+        <label className="text-[11px] font-semibold text-muted-foreground">Dari Tanggal Pesan</label>
+        <input
+          type="date"
+          value={filter.dateFrom}
+          onChange={e => onChange({ dateFrom: e.target.value })}
+          className="w-full px-3 py-2 rounded-xl bg-background border border-border text-foreground focus:border-vision-cyan outline-none"
+        />
+      </div>
+
+      <div className="space-y-1">
+        <label className="text-[11px] font-semibold text-muted-foreground">Sampai Tanggal Pesan</label>
+        <input
+          type="date"
+          value={filter.dateTo}
+          onChange={e => onChange({ dateTo: e.target.value })}
+          className="w-full px-3 py-2 rounded-xl bg-background border border-border text-foreground focus:border-vision-cyan outline-none"
+        />
+      </div>
+
+      <div className="space-y-1">
+        <label className="text-[11px] font-semibold text-muted-foreground">Produk / Bahan Baku</label>
+        <select
+          value={filter.materialId}
+          onChange={e => onChange({ materialId: e.target.value })}
+          className="w-full px-3 py-2 rounded-xl bg-background border border-border text-foreground font-semibold focus:border-vision-cyan outline-none"
+        >
+          <option value="">Semua Produk / Bahan Baku</option>
+          {materials.map(m => (
+            <option key={m.id} value={m.id}>{m.name}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="space-y-1">
+        <label className="text-[11px] font-semibold text-muted-foreground">Cari Nama Supplier</label>
+        <div className="relative">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <input
+            type="text"
+            placeholder="Ketik nama supplier..."
+            value={filter.supplierSearch}
+            onChange={e => onChange({ supplierSearch: e.target.value })}
+            className="w-full pl-8 pr-3 py-2 rounded-xl bg-background border border-border text-foreground font-semibold focus:border-vision-cyan outline-none"
+          />
+        </div>
+      </div>
+
+      <div className="flex items-end">
+        <button
+          type="button"
+          onClick={onReset}
+          className="w-full px-3 py-2 rounded-xl bg-muted hover:bg-muted/80 text-foreground font-bold flex items-center justify-center gap-1.5 transition-colors"
+        >
+          <RotateCcw size={13} />
+          <span>Reset Filter</span>
+        </button>
+      </div>
+    </div>
+  )
 
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500 relative">
-      
+    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
       {/* HEADER */}
       <div className="vision-glass p-5 rounded-3xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-xl">
         <div className="flex items-center gap-4">
-          <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-vision-cyan to-vision-blue flex items-center justify-center text-white text-2xl shadow-glow-cyan">
-            <Boxes size={24} />
+          <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-vision-cyan to-vision-blue flex items-center justify-center text-white shadow-glow-cyan">
+            <Package size={24} />
           </div>
           <div>
-            <h2 className="text-xl font-black text-foreground flex items-center gap-2">
-              Manajemen Stok & Early Warning System
-            </h2>
-            <p className="text-xs text-muted-foreground mt-0.5">Pendekatan Rolling Window, Lead Time Dinamis & Inventory Position (IP)</p>
+            <h2 className="text-xl font-black text-foreground">Manajemen Stock & Log Bahan Baku</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Monitoring stok terkini, umur batch FIFO, verifikasi input operator, serta riwayat pemesanan & kedatangan.
+            </p>
           </div>
         </div>
 
-        <button 
-          onClick={() => setIsModalOpen(true)}
-          className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-vision-cyan via-vision-blue to-vision-purple text-white font-bold text-xs transition-all flex items-center gap-2 shadow-glow-cyan hover:opacity-90"
-        >
-          <ShoppingCart size={16} />
-          <span>+ Pesan Stok</span>
-        </button>
+        {feedback && (
+          <div className="px-3.5 py-2 rounded-xl bg-vision-emerald/15 border border-vision-emerald/30 text-vision-emerald text-xs font-bold flex items-center gap-2">
+            <CheckCircle2 size={15} />
+            <span>{feedback}</span>
+          </div>
+        )}
       </div>
 
-      {/* KPI CARDS EWS */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="vision-glass p-5 rounded-2xl border-l-4 border-l-vision-emerald relative overflow-hidden">
-          <div className="flex justify-between">
-            <div>
-              <span className="text-xs font-bold text-muted-foreground uppercase tracking-wider">IP Aman</span>
-              <h3 className="text-2xl font-black text-vision-emerald mt-1">{countAman} Bahan</h3>
-            </div>
-            <div className="w-10 h-10 rounded-2xl bg-vision-emerald/20 text-vision-emerald flex items-center justify-center">
-              <CircleCheck size={20} />
-            </div>
-          </div>
-          <p className="text-[11px] text-muted-foreground mt-2">Inventory Position &gt; ROP</p>
-        </div>
-
-        <div className="vision-glass p-5 rounded-2xl border-l-4 border-l-vision-amber relative overflow-hidden">
-          <div className="flex justify-between">
-            <div>
-              <span className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Perlu Reorder (&le; ROP)</span>
-              <h3 className="text-2xl font-black text-vision-amber mt-1">{countReorder} Bahan</h3>
-            </div>
-            <div className="w-10 h-10 rounded-2xl bg-vision-amber/20 text-vision-amber flex items-center justify-center">
-              <TriangleAlert size={20} />
-            </div>
-          </div>
-          <p className="text-[11px] text-muted-foreground mt-2">IP menyentuh ROP &mdash; Segera pesan ulang</p>
-        </div>
-
-        <div className="vision-glass p-5 rounded-2xl border-l-4 border-l-vision-rose relative overflow-hidden">
-          <div className="flex justify-between">
-            <div>
-              <span className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Kritis (&le; SS)</span>
-              <h3 className="text-2xl font-black text-vision-rose mt-1">{countKritis} Bahan</h3>
-            </div>
-            <div className="w-10 h-10 rounded-2xl bg-vision-rose/20 text-vision-rose flex items-center justify-center">
-              <CircleX size={20} className="animate-pulse" />
-            </div>
-          </div>
-          <p className="text-[11px] text-muted-foreground mt-2">IP menyentuh Safety Stock Dinamis</p>
-        </div>
-      </div>
-
-      {/* TABEL EWS */}
+      {/* TABEL 0: MONITORING STOCK TERKINI */}
       <div className="vision-glass p-6 rounded-3xl space-y-4 shadow-xl overflow-hidden">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-border pb-4 gap-2">
+        <div className="flex items-center justify-between border-b border-border pb-4">
           <div>
             <h3 className="text-base font-bold text-foreground flex items-center gap-2">
-              <TrendingUp className="text-vision-cyan" size={18} /> Monitoring Stok (Inventory Position)
+              <Layers className="text-vision-cyan" size={18} /> Monitoring Stock Terkini
             </h3>
-            <p className="text-xs text-muted-foreground mt-0.5">Mempertimbangkan stok fisik (On-Hand) dan barang yang masih di perjalanan (Outstanding).</p>
-          </div>
-          <div className="text-xs text-muted-foreground flex items-center gap-2">
-            <span className="inline-block w-2.5 h-2.5 rounded-full bg-vision-emerald animate-pulse"></span> Live Data
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Sisa stok aktif batch terverifikasi, umur batch fisik untuk memantau FIFO, dan parameter EWS (SS, ROP, EOQ).
+            </p>
           </div>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs border-collapse min-w-[950px]">
-            <thead className="text-muted-foreground border-b border-border uppercase tracking-wider">
-              <tr>
-                <th className="pb-3 px-3 font-semibold text-left w-[15%]">Bahan Baku</th>
-                <th className="pb-3 px-3 font-semibold text-center w-[15%]">Inventory Position (IP)</th>
-                <th className="pb-3 px-3 font-semibold text-center w-[12%]">Dynamic ROP</th>
-                <th className="pb-3 px-3 font-semibold text-center w-[10%]">Dynamic SS</th>
-                <th className="pb-3 px-3 font-semibold text-center w-[25%]">Umur Batch (Fisik)</th>
-                <th className="pb-3 px-3 font-semibold text-center w-[15%]">Indikator EWS</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border/50 text-foreground">
-              {ewsData.map(item => (
-                <tr key={item.material_id} className="hover:bg-muted/20 transition-colors">
-                  <td className="py-3 px-3 font-bold text-left">{item.material_name}</td>
-                  
-                  {/* Inventory Position Breakdown */}
-                  <td className="py-3 px-3 text-center">
-                    <div className="font-extrabold text-vision-cyan">
-                      {item.inventoryPosition.toLocaleString('id-ID')} {item.mat?.monitoring_unit}
-                    </div>
-                    <div className="text-[10px] text-muted-foreground mt-0.5">
-                      Fisik: {item.onHand} | <span className={item.outstanding > 0 ? 'text-vision-amber font-bold' : ''}>Di Jalan: {item.outstanding}</span>
-                    </div>
-                  </td>
-
-                  <td className="py-3 px-3 font-semibold text-muted-foreground text-center">
-                    {item.reorder_point_dynamic.toLocaleString('id-ID')} {item.mat?.monitoring_unit}
-                  </td>
-                  <td className="py-3 px-3 font-semibold text-muted-foreground text-center">
-                    {item.safety_stock_dynamic.toLocaleString('id-ID')} {item.mat?.monitoring_unit}
-                  </td>
-                  
-                  {/* Umur Batch Fisik Saja */}
-                  <td className="py-3 px-3">
-                    <div className="space-y-1.5 py-1 max-w-[260px] mx-auto">
-                      {item.arrivedBatches.length === 0 ? (
-                        <span className="text-muted-foreground italic text-center block">Stok Fisik Kosong</span>
-                      ) : (
-                        item.arrivedBatches.map(b => {
-                          const diffTime = Math.abs(new Date().getTime() - new Date(b.arrival_date!).getTime())
-                          const days = Math.ceil(diffTime / (1000 * 60 * 60 * 24))
-                          const badgeCol = days > 4 ? "bg-vision-amber/15 text-vision-amber border-vision-amber/30" : "bg-vision-cyan/15 text-vision-cyan border-vision-cyan/30"
-                          
-                          return (
-                            <div key={b.id} className="flex items-center justify-between text-[11px] bg-background/40 px-3 py-1.5 rounded-lg border border-border w-full">
-                              <span className={`px-2 py-0.5 rounded ${badgeCol} border text-[10px] font-semibold whitespace-nowrap`}>
-                                {days} Hari lalu
-                              </span>
-                              <div className="flex items-center gap-1.5">
-                                <span className="font-bold">{b.qty.toLocaleString('id-ID')} {item.mat?.monitoring_unit}</span>
-                              </div>
-                            </div>
-                          )
-                        })
-                      )}
-                    </div>
-                  </td>
-                  
-                  <td className="py-3 px-3 text-center">
-                    <span className={`px-2 py-1 rounded-full border font-bold flex items-center justify-center gap-1.5 w-full ${item.statusColor}`}>
-                      <item.Icon size={14} /> {item.status}
-                    </span>
-                  </td>
+        {loadingStock ? (
+          <div className="py-10 flex items-center justify-center gap-2 text-vision-cyan text-xs font-bold">
+            <Loader2 className="w-5 h-5 animate-spin" />
+            <span>Memuat monitoring stok terkini...</span>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs border-collapse min-w-[980px]">
+              <thead className="text-muted-foreground border-b border-border uppercase tracking-wider">
+                <tr>
+                  <th className="pb-3 px-3 font-semibold text-left">Bahan Baku</th>
+                  <th className="pb-3 px-3 font-semibold text-right">Stok Saat Ini</th>
+                  <th className="pb-3 px-3 font-semibold text-right">Safety Stock</th>
+                  <th className="pb-3 px-3 font-semibold text-right">ROP</th>
+                  <th className="pb-3 px-3 font-semibold text-right">EOQ</th>
+                  <th className="pb-3 px-3 font-semibold text-left">Umur Batch (Fisik)</th>
+                  <th className="pb-3 px-3 font-semibold text-center">Status EWS</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* TABEL LOG PEMESANAN */}
-      <div className="vision-glass p-6 rounded-3xl space-y-4 shadow-xl overflow-hidden">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-border pb-4 gap-2">
-          <div>
-            <h3 className="text-base font-bold text-foreground flex items-center gap-2">
-              <Clock className="text-vision-cyan" size={18} /> Riwayat Log Pemesanan & Kedatangan
-            </h3>
-            <p className="text-xs text-muted-foreground mt-0.5">Tandai pesanan sebagai diterima jika barang sudah tiba di gudang.</p>
-          </div>
-        </div>
-
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs border-collapse min-w-[850px]">
-            <thead className="text-muted-foreground border-b border-border uppercase tracking-wider">
-              <tr>
-                <th className="pb-3 px-3 font-semibold text-left">Tgl Pesan</th>
-                <th className="pb-3 px-3 font-semibold text-left">Bahan Baku</th>
-                <th className="pb-3 px-3 font-semibold text-center">Jumlah</th>
-                <th className="pb-3 px-3 font-semibold text-left">Supplier/Keterangan</th>
-                <th className="pb-3 px-3 font-semibold text-right">Tgl Tiba</th>
-                <th className="pb-3 px-3 font-semibold text-center">Aksi / Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border/50 text-foreground">
-              {batches.map(log => {
-                const mat = materials.find(m => m.id === log.material_id)
-                const isArrived = log.arrival_date !== null
-
-                return (
-                  <tr key={log.id} className="hover:bg-muted/20 transition-colors">
-                    <td className="py-3 px-3 font-mono text-[10px] text-muted-foreground text-left">{log.order_date}</td>
-                    <td className="py-3 px-3 font-bold text-left">{ewsParams.find(e => e.material_id === log.material_id)?.material_name || 'Unknown'}</td>
-                    <td className="py-3 px-3 font-extrabold text-vision-cyan text-center">
-                      {log.qty.toLocaleString('id-ID')} {mat?.monitoring_unit}
-                    </td>
-                    <td className="py-3 px-3 text-muted-foreground text-left">{log.supplier || '-'}</td>
-                    
-                    <td className="py-3 px-3 font-bold text-right">
-                      {isArrived ? (
-                        <span className="text-vision-emerald">{log.arrival_date}</span>
-                      ) : (
-                        <span className="text-vision-amber animate-pulse">Menunggu...</span>
-                      )}
-                    </td>
-
-                    <td className="py-3 px-3 text-center">
-                      {isArrived ? (
-                        <span className="px-2 py-1 rounded-md bg-vision-emerald/10 text-vision-emerald font-semibold inline-flex items-center gap-1">
-                          <Check size={14} /> Diterima
-                        </span>
-                      ) : (
-                        <button 
-                          onClick={() => handleMarkArrived(log.id)}
-                          className="px-3 py-1.5 rounded-md bg-gradient-to-r from-vision-cyan to-vision-blue text-white font-bold shadow-md hover:opacity-90 inline-flex items-center gap-1"
-                        >
-                          Tandai Diterima
-                        </button>
-                      )}
+              </thead>
+              <tbody className="divide-y divide-border/50 text-foreground">
+                {stockRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="py-6 text-center text-muted-foreground italic">
+                      Belum ada data monitoring stok.
                     </td>
                   </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
+                ) : (
+                  stockRows.map(row => {
+                    const currentStock = Number(row.current_stock ?? 0)
+                    const ss = row.safety_stock !== undefined && row.safety_stock !== null ? Number(row.safety_stock) : null
+                    const rop = row.rop !== undefined && row.rop !== null ? Number(row.rop) : null
+                    const eoq = row.eoq !== undefined && row.eoq !== null ? Number(row.eoq) : null
+                    const computedStatus =
+                      row.ews_status ||
+                      (rop !== null && currentStock <= rop
+                        ? 'REORDER'
+                        : ss !== null && currentStock <= ss
+                        ? 'KRITIS'
+                        : 'AMAN')
+
+                    const badgeClass =
+                      computedStatus.toLowerCase().includes('reorder') || computedStatus.toLowerCase().includes('kritis')
+                        ? "bg-vision-rose/15 text-vision-rose border-vision-rose/30"
+                        : "bg-vision-emerald/15 text-vision-emerald border-vision-emerald/30"
+
+                    return (
+                      <tr key={row.material_id} className="hover:bg-muted/20 transition-colors align-middle">
+                        <td className="py-3 px-3 font-bold">{row.name}</td>
+                        <td className="py-3 px-3 text-right">
+                          <div className="font-extrabold text-vision-cyan">
+                            {currentStock.toLocaleString('id-ID', { maximumFractionDigits: 2 })} {row.monitoring_unit}
+                          </div>
+                          <div className="text-[10px] text-muted-foreground font-mono">
+                            Fisik: {row.on_hand_qty.toLocaleString('id-ID', { maximumFractionDigits: 2 })} | Jalan: {row.in_transit_qty.toLocaleString('id-ID', { maximumFractionDigits: 2 })}
+                          </div>
+                        </td>
+                        <td className="py-3 px-3 text-right font-mono">
+                          {ss !== null ? `${ss.toLocaleString('id-ID', { maximumFractionDigits: 2 })} ${row.monitoring_unit}` : '-'}
+                        </td>
+                        <td className="py-3 px-3 text-right font-mono">
+                          {rop !== null ? `${rop.toLocaleString('id-ID', { maximumFractionDigits: 2 })} ${row.monitoring_unit}` : '-'}
+                        </td>
+                        <td className="py-3 px-3 text-right font-mono">
+                          {eoq !== null ? `${eoq.toLocaleString('id-ID', { maximumFractionDigits: 2 })} ${row.monitoring_unit}` : '-'}
+                        </td>
+                        <td className="py-3 px-3">
+                          {row.batch_ages.length === 0 ? (
+                            <span className="text-[11px] text-muted-foreground italic">-</span>
+                          ) : (
+                            <div className="flex flex-col gap-1.5 max-w-[260px]">
+                              {row.batch_ages.map(badge => (
+                                <div
+                                  key={badge.id}
+                                  title={`Qty Awal: ${badge.initialQty} ${row.monitoring_unit} | Sisa Stok: ${badge.remainingQty} ${row.monitoring_unit}`}
+                                  className="flex items-center justify-between gap-2 px-2.5 py-1 rounded-lg bg-background/70 border border-border/70 text-[11px]"
+                                >
+                                  <span className="px-1.5 py-0.5 rounded bg-vision-amber/15 text-vision-amber font-bold text-[10px] shrink-0">
+                                    {badge.ageDays} Hari lalu
+                                  </span>
+                                  <span className="font-mono font-bold text-foreground shrink-0">
+                                    {badge.remainingQty.toLocaleString('id-ID', { maximumFractionDigits: 2 })} {row.monitoring_unit}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-3 px-3 text-center">
+                          <span className={`px-2.5 py-1 rounded-full border text-[10px] font-extrabold uppercase ${badgeClass}`}>
+                            {computedStatus}
+                          </span>
+                        </td>
+                      </tr>
+                    )
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <ServerPagination
+          page={stockPage}
+          pageSize={PAGE_SIZE}
+          totalCount={stockTotal}
+          onPageChange={setStockPage}
+        />
       </div>
 
-      {/* ========================================= */}
-      {/* MODAL PESAN STOK */}
-      {/* ========================================= */}
-      {isModalOpen && (
+      {/* TABEL 1: TABEL MASTER VERIFIKASI PESANAN STOCK */}
+      <div className="vision-glass p-6 rounded-3xl space-y-4 shadow-xl overflow-hidden">
+        <div className="flex items-center justify-between border-b border-border pb-4">
+          <div>
+            <h3 className="text-base font-bold text-foreground flex items-center gap-2">
+              <ClipboardCheck className="text-vision-amber" size={18} /> Verifikasi Pesanan Stock (Input Operator)
+            </h3>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Setujui atau tolak batch bahan baku yang baru diinput operator sebelum masuk ke perhitungan stok/FIFO.
+            </p>
+          </div>
+        </div>
+
+        {renderFilterBar(
+          pendingFilter,
+          updatePendingFilter,
+          () => {
+            setPendingPage(1)
+            setPendingFilter(EMPTY_FILTER)
+          }
+        )}
+
+        {loadingPending ? (
+          <div className="py-10 flex items-center justify-center gap-2 text-vision-cyan text-xs font-bold">
+            <Loader2 className="w-5 h-5 animate-spin" />
+            <span>Memuat data verifikasi...</span>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs border-collapse min-w-[820px]">
+              <thead className="text-muted-foreground border-b border-border uppercase tracking-wider">
+                <tr>
+                  <th className="pb-3 px-3 font-semibold text-left">Bahan Baku</th>
+                  <th className="pb-3 px-3 font-semibold text-center">Tgl Pesan</th>
+                  <th className="pb-3 px-3 font-semibold text-center">Tgl Tiba</th>
+                  <th className="pb-3 px-3 font-semibold text-left">Supplier</th>
+                  <th className="pb-3 px-3 font-semibold text-right">Qty</th>
+                  <th className="pb-3 px-3 font-semibold text-center">Verifikasi</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/50 text-foreground">
+                {pendingBatches.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="py-6 text-center text-muted-foreground italic">
+                      Tidak ada pesanan stock yang sesuai filter / menunggu verifikasi.
+                    </td>
+                  </tr>
+                ) : (
+                  pendingBatches.map(row => {
+                    const meta = getMaterialMeta(row.materials)
+                    const isRowBusy = busyId === row.id
+                    return (
+                      <tr key={row.id} className="hover:bg-muted/20 transition-colors">
+                        <td className="py-3 px-3 font-bold">{meta.name}</td>
+                        <td className="py-3 px-3 text-center font-mono text-[11px]">{row.order_date}</td>
+                        <td className="py-3 px-3 text-center font-mono text-[11px]">{row.arrival_date || '-'}</td>
+                        <td className="py-3 px-3">{row.supplier || '-'}</td>
+                        <td className="py-3 px-3 text-right font-extrabold text-vision-cyan">
+                          {Number(row.initial_qty).toLocaleString('id-ID')} {meta.unit}
+                        </td>
+                        <td className="py-3 px-3 text-center">
+                          <div className="inline-flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              disabled={isRowBusy}
+                              onClick={() => handleVerifyAction(row.id, 'approved')}
+                              className="px-2.5 py-1 rounded-lg bg-vision-emerald/15 border border-vision-emerald/30 text-vision-emerald hover:bg-vision-emerald/25 font-bold text-[11px] inline-flex items-center gap-1 disabled:opacity-40"
+                            >
+                              {isRowBusy ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+                              <span>Setujui</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isRowBusy}
+                              onClick={() => handleVerifyAction(row.id, 'rejected')}
+                              className="px-2.5 py-1 rounded-lg bg-vision-rose/15 border border-vision-rose/30 text-vision-rose hover:bg-vision-rose/25 font-bold text-[11px] inline-flex items-center gap-1 disabled:opacity-40"
+                            >
+                              <XCircle size={12} />
+                              <span>Tolak</span>
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <ServerPagination
+          page={pendingPage}
+          pageSize={PAGE_SIZE}
+          totalCount={pendingTotal}
+          onPageChange={setPendingPage}
+        />
+      </div>
+
+      {/* TABEL 2: RIWAYAT LOG PEMESANAN & KEDATANGAN (EDIT & HAPUS) */}
+      <div className="vision-glass p-6 rounded-3xl space-y-4 shadow-xl overflow-hidden">
+        <div className="flex items-center justify-between border-b border-border pb-4">
+          <div>
+            <h3 className="text-base font-bold text-foreground flex items-center gap-2">
+              <History className="text-vision-cyan" size={18} /> Riwayat Log Pemesanan & Kedatangan
+            </h3>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Edit seluruh kolom (termasuk qty dengan hitung ulang sisa stok) atau hapus log batch.
+            </p>
+          </div>
+        </div>
+
+        {renderFilterBar(
+          historyFilter,
+          updateHistoryFilter,
+          () => {
+            setHistoryPage(1)
+            setHistoryFilter(EMPTY_FILTER)
+          }
+        )}
+
+        {loadingHistory ? (
+          <div className="py-10 flex items-center justify-center gap-2 text-vision-cyan text-xs font-bold">
+            <Loader2 className="w-5 h-5 animate-spin" />
+            <span>Memuat riwayat log...</span>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs border-collapse min-w-[960px]">
+              <thead className="text-muted-foreground border-b border-border uppercase tracking-wider">
+                <tr>
+                  <th className="pb-3 px-3 font-semibold text-left">Bahan Baku</th>
+                  <th className="pb-3 px-3 font-semibold text-center">Tgl Pesan</th>
+                  <th className="pb-3 px-3 font-semibold text-center">Tgl Tiba</th>
+                  <th className="pb-3 px-3 font-semibold text-left">Supplier</th>
+                  <th className="pb-3 px-3 font-semibold text-right">Qty Awal</th>
+                  <th className="pb-3 px-3 font-semibold text-right">Sisa Stok</th>
+                  <th className="pb-3 px-3 font-semibold text-center">Status</th>
+                  <th className="pb-3 px-3 font-semibold text-center">Aksi</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/50 text-foreground">
+                {historyBatches.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="py-6 text-center text-muted-foreground italic">
+                      Tidak ada riwayat log pemesanan & kedatangan yang sesuai filter.
+                    </td>
+                  </tr>
+                ) : (
+                  historyBatches.map(row => {
+                    const meta = getMaterialMeta(row.materials)
+                    const isRowBusy = busyId === row.id
+
+                    const statusBadge =
+                      row.verification_status === 'approved'
+                        ? "bg-vision-emerald/15 text-vision-emerald border-vision-emerald/30"
+                        : row.verification_status === 'rejected'
+                        ? "bg-vision-rose/15 text-vision-rose border-vision-rose/30"
+                        : "bg-vision-amber/15 text-vision-amber border-vision-amber/30"
+
+                    return (
+                      <tr key={row.id} className="hover:bg-muted/20 transition-colors">
+                        <td className="py-3 px-3 font-bold">{meta.name}</td>
+                        <td className="py-3 px-3 text-center font-mono text-[11px]">{row.order_date}</td>
+                        <td className="py-3 px-3 text-center font-mono text-[11px]">{row.arrival_date || '-'}</td>
+                        <td className="py-3 px-3">{row.supplier || '-'}</td>
+                        <td className="py-3 px-3 text-right font-semibold">
+                          {Number(row.initial_qty).toLocaleString('id-ID')} {meta.unit}
+                        </td>
+                        <td className="py-3 px-3 text-right font-extrabold text-vision-cyan">
+                          {Number(row.qty).toLocaleString('id-ID')} {meta.unit}
+                        </td>
+                        <td className="py-3 px-3 text-center">
+                          <span className={`px-2.5 py-1 rounded-full border text-[10px] font-extrabold uppercase ${statusBadge}`}>
+                            {row.verification_status}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 text-center">
+                          <div className="inline-flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              disabled={isRowBusy}
+                              onClick={() => openEditModal(row)}
+                              className="px-2.5 py-1 rounded-lg bg-vision-blue/15 border border-vision-blue/30 text-vision-blue hover:bg-vision-blue/25 font-bold text-[11px] inline-flex items-center gap-1 disabled:opacity-40"
+                            >
+                              <Pencil size={12} />
+                              <span>Edit</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isRowBusy}
+                              onClick={() => handleDeleteBatch(row)}
+                              className="px-2.5 py-1 rounded-lg bg-vision-rose/15 border border-vision-rose/30 text-vision-rose hover:bg-vision-rose/25 font-bold text-[11px] inline-flex items-center gap-1 disabled:opacity-40"
+                            >
+                              {isRowBusy ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                              <span>Hapus</span>
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <ServerPagination
+          page={historyPage}
+          pageSize={PAGE_SIZE}
+          totalCount={historyTotal}
+          onPageChange={setHistoryPage}
+        />
+      </div>
+
+      {/* MODAL EDIT LOG PEMESANAN & KEDATANGAN */}
+      {editingBatch && (
         <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200">
-          <div className="vision-glass w-full max-w-lg rounded-3xl p-6 sm:p-8 border border-border/50 shadow-2xl relative space-y-5 animate-in zoom-in-95 duration-200">
-            
+          <div className="vision-glass w-full max-w-lg rounded-3xl p-6 sm:p-8 border border-border/50 shadow-2xl space-y-5">
             <div className="flex items-center justify-between border-b border-border pb-3">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-vision-cyan/20 text-vision-cyan flex items-center justify-center">
-                  <ShoppingCart size={20} />
+                <div className="w-10 h-10 rounded-xl bg-vision-blue/20 text-vision-blue flex items-center justify-center">
+                  <Pencil size={18} />
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-foreground">Form Pesan Stok Baru</h3>
-                  <p className="text-xs text-muted-foreground">Tanggal kedatangan diisi nanti saat barang tiba.</p>
+                  <h3 className="text-base font-bold text-foreground">Edit Log Pemesanan & Kedatangan</h3>
+                  <p className="text-xs text-muted-foreground">
+                    Perubahan qty akan otomatis menghitung ulang sisa stok batch.
+                  </p>
                 </div>
               </div>
-              <button onClick={() => setIsModalOpen(false)} className="p-2 rounded-full hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
+              <button
+                type="button"
+                onClick={() => setEditingBatch(null)}
+                className="p-2 rounded-full hover:bg-muted text-muted-foreground hover:text-foreground"
+              >
                 <X size={18} />
               </button>
             </div>
 
-            <form onSubmit={handleStockIn} className="space-y-4 text-xs">
-              <div className="space-y-1.5">
-                <label className="font-semibold text-foreground flex justify-between">
-                  <span>Bahan Baku</span>
-                  {selectedEWS && <span className="text-vision-cyan">Rekomendasi EOQ: {selectedEWS.eoq_dynamic} {selectedMat?.monitoring_unit}</span>}
-                </label>
-                <select 
-                  required 
-                  value={formStock.material_id}
-                  onChange={e => setFormStock({...formStock, material_id: e.target.value, qty: ewsParams.find(x => x.material_id === e.target.value)?.eoq_dynamic.toString() || ""})}
-                  className="w-full px-4 py-3 rounded-xl bg-background border border-border text-foreground font-semibold focus:border-vision-cyan outline-none"
-                >
-                  <option value="" disabled>-- Pilih Bahan Baku --</option>
-                  {ewsParams.map(m => (
-                    <option key={m.material_id} value={m.material_id}>{m.material_name} ({materials.find(x => x.id === m.material_id)?.monitoring_unit})</option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="font-semibold text-foreground flex justify-between">
-                  <span>Jumlah Dipesan</span>
-                  {selectedMat && <span className="text-muted-foreground">Satuan: {selectedMat.monitoring_unit}</span>}
-                </label>
-                <input 
-                  type="number" required min="1" step="0.01"
-                  value={formStock.qty}
-                  onChange={e => setFormStock({...formStock, qty: e.target.value})}
-                  className="w-full px-4 py-3 rounded-xl bg-background border border-border text-foreground font-bold focus:border-vision-cyan outline-none" 
-                />
-              </div>
-
-              {/* Box Estimasi Biaya */}
-              <div className="flex items-center justify-between p-3 rounded-xl bg-vision-amber/10 border border-vision-amber/30">
-                <div>
-                  <p className="text-[10px] font-bold text-vision-amber uppercase tracking-wider">Estimasi Nilai Barang</p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">
-                    {selectedMat ? `Berdasarkan HPP: ${formatRp(selectedMat.price_per_unit)} / ${selectedMat.monitoring_unit}` : 'Pilih bahan baku.'}
-                  </p>
+            <form onSubmit={handleSaveEdit} className="space-y-4 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <label className="font-semibold text-foreground">Bahan Baku</label>
+                  <select
+                    required
+                    value={editForm.material_id}
+                    onChange={e => setEditForm({ ...editForm, material_id: e.target.value })}
+                    className="w-full px-4 py-3 rounded-xl bg-background border border-border text-foreground font-semibold focus:border-vision-cyan outline-none"
+                  >
+                    {materials.map(m => (
+                      <option key={m.id} value={m.id}>{m.name} ({m.monitoring_unit})</option>
+                    ))}
+                  </select>
                 </div>
-                <span className="text-base font-black text-vision-amber">{formatRp(estimasiBiaya)}</span>
+
+                <div className="space-y-1.5">
+                  <label className="font-semibold text-foreground">Qty (Jumlah Awal Batch)</label>
+                  <input
+                    type="number"
+                    required
+                    min="0"
+                    step="0.01"
+                    value={editForm.initial_qty}
+                    onChange={e => setEditForm({ ...editForm, initial_qty: e.target.value })}
+                    className="w-full px-4 py-3 rounded-xl bg-background border border-border text-foreground font-bold focus:border-vision-cyan outline-none"
+                  />
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
                   <label className="font-semibold text-foreground">Tanggal Pesan</label>
-                  <input 
-                    type="date" required 
-                    value={formStock.order_date}
-                    onChange={e => setFormStock({...formStock, order_date: e.target.value})}
-                    className="w-full px-4 py-3 rounded-xl bg-background border border-border text-foreground focus:border-vision-cyan outline-none" 
+                  <input
+                    type="date"
+                    required
+                    value={editForm.order_date}
+                    onChange={e => setEditForm({ ...editForm, order_date: e.target.value })}
+                    className="w-full px-4 py-3 rounded-xl bg-background border border-border text-foreground focus:border-vision-cyan outline-none"
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <label className="font-semibold text-foreground">Supplier Tujuan</label>
-                  <input 
-                    type="text" required placeholder="Contoh: PT Segitiga"
-                    value={formStock.supplier}
-                    onChange={e => setFormStock({...formStock, supplier: e.target.value})}
-                    className="w-full px-4 py-3 rounded-xl bg-background border border-border text-foreground focus:border-vision-cyan outline-none" 
+                  <label className="font-semibold text-foreground">Tanggal Tiba</label>
+                  <input
+                    type="date"
+                    value={editForm.arrival_date}
+                    onChange={e => setEditForm({ ...editForm, arrival_date: e.target.value })}
+                    className="w-full px-4 py-3 rounded-xl bg-background border border-border text-foreground focus:border-vision-cyan outline-none"
                   />
                 </div>
               </div>
 
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <label className="font-semibold text-foreground">Supplier</label>
+                  <input
+                    type="text"
+                    value={editForm.supplier}
+                    onChange={e => setEditForm({ ...editForm, supplier: e.target.value })}
+                    className="w-full px-4 py-3 rounded-xl bg-background border border-border text-foreground font-semibold focus:border-vision-cyan outline-none"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="font-semibold text-foreground">Status Verifikasi</label>
+                  <select
+                    value={editForm.verification_status}
+                    onChange={e => setEditForm({ ...editForm, verification_status: e.target.value as VerificationStatus })}
+                    className="w-full px-4 py-3 rounded-xl bg-background border border-border text-foreground font-semibold focus:border-vision-cyan outline-none"
+                  >
+                    <option value="pending">pending</option>
+                    <option value="approved">approved</option>
+                    <option value="rejected">rejected</option>
+                  </select>
+                </div>
+              </div>
+
               <div className="flex justify-end gap-3 pt-4 border-t border-border">
-                <button type="button" onClick={() => setIsModalOpen(false)} className="px-4 py-2.5 rounded-xl bg-muted hover:bg-muted/80 text-foreground font-semibold">
+                <button
+                  type="button"
+                  onClick={() => setEditingBatch(null)}
+                  className="px-4 py-2.5 rounded-xl bg-muted hover:bg-muted/80 text-foreground font-semibold"
+                >
                   Batal
                 </button>
-                <button disabled={isSubmitting} type="submit" className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-vision-cyan to-vision-blue text-white font-extrabold flex items-center gap-2 shadow-glow-cyan hover:opacity-90 disabled:opacity-50">
-                  {isSubmitting ? <Loader2 size={16} className="animate-spin"/> : <Send size={16}/>}
-                  Kirim Pesanan
+                <button
+                  type="submit"
+                  disabled={isSavingEdit}
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-vision-cyan to-vision-blue text-white font-extrabold flex items-center gap-2 shadow-glow-cyan hover:opacity-90 disabled:opacity-50"
+                >
+                  {isSavingEdit ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+                  Simpan Perubahan
                 </button>
               </div>
             </form>
           </div>
         </div>
       )}
-
     </div>
   )
 }

@@ -6,7 +6,8 @@ import { useTheme } from "next-themes"
 import { createClient } from "@/lib/supabase"
 import {
   Soup, LogOut, PieChart, Package, ListTodo,
-  Calculator, Settings, Sun, Moon,
+  Calculator, Settings, Sun, Moon, ShieldCheck,
+  PackagePlus, Loader2,
   type LucideIcon,
 } from "lucide-react"
 
@@ -15,20 +16,50 @@ import SettingTab from "@/components/dashboard/SettingTab"
 import StockTab from "@/components/dashboard/StockTab"
 import OrdersTab from "@/components/dashboard/OrderTab"
 import FinanceTab from "@/components/dashboard/FinanceTab"
+import ControlUserTab from "@/components/dashboard/ControlUserTab"
+import OperatorInputTab from "@/components/dashboard/OperatorInputTab"
 
 /* ========================================================================== */
 /* TYPES & DATA                                                               */
 /* ========================================================================== */
 
-type TabType = 'beranda' | 'stock' | 'pesanan' | 'keuangan' | 'setting'
+type UserRole = 'owner' | 'admin' | 'operator'
 
-const NAV_ITEMS: { id: TabType; label: string; icon: LucideIcon }[] = [
-  { id: 'beranda', label: 'Beranda', icon: PieChart },
-  { id: 'stock', label: 'Stock', icon: Package },
-  { id: 'pesanan', label: 'Pesanan', icon: ListTodo },
-  { id: 'keuangan', label: 'Keuangan', icon: Calculator },
-  { id: 'setting', label: 'Setting', icon: Settings },
+type TabType =
+  | 'beranda'
+  | 'stock'
+  | 'pesanan'
+  | 'keuangan'
+  | 'setting'
+  | 'control_user'
+  | 'operator_input'
+
+type NavItem = {
+  id: TabType
+  label: string
+  icon: LucideIcon
+  roles: UserRole[]
+}
+
+const NAV_ITEMS: NavItem[] = [
+  { id: 'beranda', label: 'Beranda', icon: PieChart, roles: ['owner', 'admin'] },
+  { id: 'stock', label: 'Stock', icon: Package, roles: ['owner', 'admin'] },
+  { id: 'pesanan', label: 'Pesanan', icon: ListTodo, roles: ['owner', 'admin'] },
+  { id: 'keuangan', label: 'Keuangan', icon: Calculator, roles: ['owner', 'admin'] },
+  { id: 'setting', label: 'Setting', icon: Settings, roles: ['owner', 'admin'] },
+  { id: 'control_user', label: 'Control User', icon: ShieldCheck, roles: ['owner'] },
+  { id: 'operator_input', label: 'Input Data', icon: PackagePlus, roles: ['operator', 'owner'] },
 ]
+
+function getDefaultTabForRole(role: UserRole): TabType {
+  if (role === 'operator') return 'operator_input'
+  return 'beranda'
+}
+
+function isTabAllowedForRole(tab: TabType, role: UserRole): boolean {
+  const item = NAV_ITEMS.find(nav => nav.id === tab)
+  return item ? item.roles.includes(role) : false
+}
 
 /* ========================================================================== */
 /* SMALL COMPONENTS                                                           */
@@ -65,17 +96,6 @@ function ThemeToggle({
   )
 }
 
-function ModulePlaceholder({ tab }: { tab: TabType }) {
-  return (
-    <div className="vision-glass p-6 sm:p-12 rounded-3xl text-center animate-in fade-in duration-300">
-      <h3 className="text-lg sm:text-xl font-bold text-foreground capitalize mb-2">Modul {tab}</h3>
-      <p className="text-muted-foreground text-sm sm:text-base">
-        Konten untuk modul ini akan dibangun pada tahap berikutnya.
-      </p>
-    </div>
-  )
-}
-
 /* ========================================================================== */
 /* PAGE                                                                       */
 /* ========================================================================== */
@@ -84,6 +104,8 @@ export default function DashboardPage() {
   const [activeTab, setActiveTab] = useState<TabType>('beranda')
   const [mounted, setMounted] = useState(false)
   const [username, setUsername] = useState<string>("Loading...")
+  const [userRole, setUserRole] = useState<UserRole | null>(null)
+  const [isAuthChecking, setIsAuthChecking] = useState(true)
   const router = useRouter()
   const supabase = useMemo(() => createClient(), [])
 
@@ -93,24 +115,63 @@ export default function DashboardPage() {
 
   useEffect(() => {
     const fetchUserProfile = async () => {
-      const { data: {user}, error: authError } = await supabase.auth.getUser()
+      setIsAuthChecking(true)
+      const { data: { user }, error: authError } = await supabase.auth.getUser()
 
       if (authError || !user) {
         router.push('/login')
         return
       }
 
-    const displayName = user.user_metadata?.full_name
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('full_name, role')
+        .eq('id', user.id)
+        .single()
 
-    setUsername(displayName || 'User')
+      const resolvedRole: UserRole =
+        profile?.role === 'owner' || profile?.role === 'admin' || profile?.role === 'operator'
+          ? profile.role
+          : 'operator'
+
+      const displayName =
+        profile?.full_name ||
+        user.user_metadata?.full_name ||
+        user.email?.split('@')[0] ||
+        'User'
+
+      setUsername(displayName)
+      setUserRole(resolvedRole)
+      setActiveTab(prev =>
+        isTabAllowedForRole(prev, resolvedRole) ? prev : getDefaultTabForRole(resolvedRole)
+      )
+      setIsAuthChecking(false)
     }
+
     fetchUserProfile()
   }, [supabase, router])
+
+  const handleSelectTab = (tab: TabType) => {
+    if (!userRole || !isTabAllowedForRole(tab, userRole)) return
+    setActiveTab(tab)
+  }
 
   const handleLogout = async () => {
     await supabase.auth.signOut()
     router.push('/login')
   }
+
+  const visibleNavItems = useMemo(() => {
+    if (!userRole) return []
+    return NAV_ITEMS.filter(item => item.roles.includes(userRole))
+  }, [userRole])
+
+  const effectiveTab: TabType = useMemo(() => {
+    if (!userRole) return 'beranda'
+    return isTabAllowedForRole(activeTab, userRole)
+      ? activeTab
+      : getDefaultTabForRole(userRole)
+  }, [activeTab, userRole])
 
   return (
     <div className="min-h-screen flex flex-col p-4 sm:p-6 lg:p-8 space-y-6 relative overflow-hidden">
@@ -131,6 +192,11 @@ export default function DashboardPage() {
               <h2 className="text-base font-black leading-none text-foreground truncate">MIE KURNIA JAYA</h2>
               <p className="text-[11px] text-muted-foreground mt-1">
                 User: <strong className="text-vision-cyan">{username}</strong>
+                {userRole && (
+                  <span className="ml-2 px-2 py-0.5 rounded-md bg-vision-cyan/15 text-vision-cyan font-bold uppercase text-[10px]">
+                    {userRole}
+                  </span>
+                )}
               </p>
             </div>
           </div>
@@ -154,16 +220,16 @@ export default function DashboardPage() {
         </div>
 
         {/* TASKBAR NAVIGASI UTAMA */}
-        <nav className="grid grid-cols-5 sm:flex sm:flex-wrap items-center justify-center gap-1 sm:gap-1.5 bg-background/50 p-1.5 rounded-2xl border border-border w-full xl:w-auto">
-          {NAV_ITEMS.map(({ id, label, icon: Icon }) => {
-            const isActive = activeTab === id
+        <nav className="flex flex-wrap items-center justify-center gap-1 sm:gap-1.5 bg-background/50 p-1.5 rounded-2xl border border-border w-full xl:w-auto">
+          {visibleNavItems.map(({ id, label, icon: Icon }) => {
+            const isActive = effectiveTab === id
             return (
               <button
                 key={id}
                 type="button"
-                onClick={() => setActiveTab(id)}
+                onClick={() => handleSelectTab(id)}
                 aria-current={isActive ? 'page' : undefined}
-                className={`px-1.5 sm:px-4 py-2 sm:py-2.5 rounded-xl font-extrabold text-[10px] sm:text-xs transition-all duration-300 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2
+                className={`px-2 sm:px-4 py-2 sm:py-2.5 rounded-xl font-extrabold text-[10px] sm:text-xs transition-all duration-300 flex items-center justify-center gap-1.5 sm:gap-2
                   ${isActive ? 'bg-gradient-to-r from-vision-cyan to-vision-blue text-white shadow-glow-cyan' : 'text-muted-foreground hover:text-foreground'}`}
               >
                 <Icon size={16} />
@@ -192,12 +258,22 @@ export default function DashboardPage() {
 
       {/* CONTAINER KONTEN MODUL */}
       <main className="w-full max-w-[1600px] mx-auto flex-1 relative z-10">
-        {/* {activeTab === 'beranda' ? <BerandaTab /> : <ModulePlaceholder tab={activeTab} />} */}
-        {activeTab === 'beranda' && <BerandaTab />}
-        {activeTab === 'setting' && <SettingTab />}
-        {activeTab === 'stock' && <StockTab />}
-        {activeTab === 'pesanan' && <OrdersTab />}
-        {activeTab === 'keuangan' && <FinanceTab />}
+        {isAuthChecking || !userRole ? (
+          <div className="flex flex-col items-center justify-center h-[50vh] space-y-3 text-vision-cyan">
+            <Loader2 className="w-9 h-9 animate-spin" />
+            <p className="text-xs font-bold animate-pulse">Memverifikasi Hak Akses...</p>
+          </div>
+        ) : (
+          <>
+            {effectiveTab === 'beranda' && isTabAllowedForRole('beranda', userRole) && <BerandaTab />}
+            {effectiveTab === 'setting' && isTabAllowedForRole('setting', userRole) && <SettingTab />}
+            {effectiveTab === 'stock' && isTabAllowedForRole('stock', userRole) && <StockTab />}
+            {effectiveTab === 'pesanan' && isTabAllowedForRole('pesanan', userRole) && <OrdersTab />}
+            {effectiveTab === 'keuangan' && isTabAllowedForRole('keuangan', userRole) && <FinanceTab />}
+            {effectiveTab === 'control_user' && userRole === 'owner' && <ControlUserTab />}
+            {effectiveTab === 'operator_input' && isTabAllowedForRole('operator_input', userRole) && <OperatorInputTab />}
+          </>
+        )}
       </main>
     </div>
   )
