@@ -1,11 +1,12 @@
 'use client'
 
 import { useState, useEffect, useMemo } from "react"
+import Image from "next/image"
 import { useRouter } from "next/navigation"
 import { useTheme } from "next-themes"
 import { createClient } from "@/lib/supabase"
 import {
-  Soup, LogOut, PieChart, Package, ListTodo,
+  LogOut, PieChart, Package, ListTodo,
   Calculator, Settings, Sun, Moon, ShieldCheck,
   PackagePlus, Loader2,
   type LucideIcon,
@@ -42,17 +43,18 @@ type NavItem = {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { id: 'beranda', label: 'Beranda', icon: PieChart, roles: ['owner', 'admin'] },
-  { id: 'stock', label: 'Stock', icon: Package, roles: ['owner', 'admin'] },
-  { id: 'pesanan', label: 'Pesanan', icon: ListTodo, roles: ['owner', 'admin'] },
-  { id: 'keuangan', label: 'Keuangan', icon: Calculator, roles: ['owner', 'admin'] },
-  { id: 'setting', label: 'Setting', icon: Settings, roles: ['owner', 'admin'] },
+  { id: 'beranda', label: 'Beranda', icon: PieChart, roles: ['owner'] },
+  { id: 'stock', label: 'Stock', icon: Package, roles: ['owner'] },
+  { id: 'pesanan', label: 'Pesanan', icon: ListTodo, roles: ['owner', 'operator'] },
+  { id: 'keuangan', label: 'Keuangan', icon: Calculator, roles: ['owner'] },
+  { id: 'setting', label: 'Setting', icon: Settings, roles: ['owner'] },
   { id: 'control_user', label: 'Control User', icon: ShieldCheck, roles: ['owner'] },
-  { id: 'operator_input', label: 'Input Data', icon: PackagePlus, roles: ['operator', 'owner'] },
+  { id: 'operator_input', label: 'Input Data', icon: PackagePlus, roles: ['owner', 'admin'] },
 ]
 
 function getDefaultTabForRole(role: UserRole): TabType {
-  if (role === 'operator') return 'operator_input'
+  if (role === 'admin') return 'operator_input'
+  if (role === 'operator') return 'pesanan'
   return 'beranda'
 }
 
@@ -84,7 +86,6 @@ function ThemeToggle({
       onClick={() => setTheme(isDark ? 'light' : 'dark')}
       className={className}
     >
-      {/* Placeholder dengan ukuran sama mencegah layout shift & mismatch hydration */}
       {!mounted ? (
         <span className="block" style={{ width: iconSize, height: iconSize }} />
       ) : isDark ? (
@@ -180,13 +181,19 @@ export default function DashboardPage() {
       <div className="absolute w-[360px] h-[360px] sm:w-[600px] sm:h-[600px] bg-[radial-gradient(circle,rgba(6,182,212,0.15)_0%,transparent_70%)] -top-[80px] -left-[100px] sm:-top-[120px] sm:-left-[150px] rounded-full blur-3xl pointer-events-none -z-10" />
 
       {/* HEADER & TASKBAR */}
-      <header className="vision-glass p-4 sm:p-5 rounded-3xl flex flex-col xl:flex-row items-center justify-between gap-4 relative z-10">
+      <header className="vision-glass p-4 sm:p-5 rounded-3xl flex flex-col xl:flex-row items-center justify-between gap-4 relative z-10 print:hidden">
 
         {/* Logo & User */}
         <div className="flex items-center justify-between w-full xl:w-auto gap-3">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-11 h-11 shrink-0 rounded-2xl bg-gradient-to-tr from-vision-cyan to-vision-blue flex items-center justify-center text-white shadow-glow-cyan">
-              <Soup size={24} />
+            <div className="w-11 h-11 shrink-0 rounded-2xl bg-gradient-to-tr from-vision-cyan to-vision-blue flex items-center justify-center text-white shadow-glow-cyan overflow-hidden p-1">
+              <Image
+                src="/logo-mkj.png"
+                alt="logo Mie Kurnia Jaya"
+                width={44}
+                height={44}
+                className="w-full h-full object-contain"
+              />
             </div>
             <div className="min-w-0">
               <h2 className="text-base font-black leading-none text-foreground truncate">MIE KURNIA JAYA</h2>

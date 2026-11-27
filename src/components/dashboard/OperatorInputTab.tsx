@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { ClipboardList, PackagePlus, Loader2, Send, CheckCircle2 } from "lucide-react"
 import { createClient } from "@/lib/supabase"
 
@@ -8,7 +8,7 @@ type ProductOption = { id: string; name: string; unit: string }
 type MaterialOption = { id: string; name: string; monitoring_unit: string }
 
 export default function OperatorInputTab() {
-  const supabase = createClient()
+  const supabase = useMemo(() => createClient(), [])
   const [products, setProducts] = useState<ProductOption[]>([])
   const [materials, setMaterials] = useState<MaterialOption[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -47,7 +47,7 @@ export default function OperatorInputTab() {
       setIsLoading(false)
     }
     loadOptions()
-  }, [])
+  }, [supabase])
 
   const handleOrderSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -99,8 +99,9 @@ export default function OperatorInputTab() {
 
   const handleMaterialSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!materialForm.material_id || !materialForm.qty || !materialForm.order_date) {
-      return alert("Lengkapi bahan baku, jumlah, dan tanggal pesan.")
+    const parsedQty = parseFloat(materialForm.qty)
+    if (!materialForm.material_id || Number.isNaN(parsedQty) || parsedQty <= 0 || !materialForm.order_date) {
+      return alert("Lengkapi bahan baku, jumlah (> 0), dan tanggal pesan.")
     }
 
     setSubmittingMaterial(true)
@@ -110,10 +111,12 @@ export default function OperatorInputTab() {
       .from('inventory_batches')
       .insert({
         material_id: materialForm.material_id,
-        qty: parseFloat(materialForm.qty),
+        initial_qty: parsedQty,
+        qty: parsedQty,
         order_date: materialForm.order_date,
         arrival_date: materialForm.arrival_date || null,
-        supplier: materialForm.supplier || null
+        supplier: materialForm.supplier?.trim() || null,
+        verification_status: 'pending'
       })
 
     setSubmittingMaterial(false)
@@ -127,7 +130,7 @@ export default function OperatorInputTab() {
         arrival_date: "",
         supplier: ""
       })
-      setStatusMessage("Input bahan baku berhasil disimpan.")
+      setStatusMessage("Input bahan baku berhasil disimpan dan menunggu verifikasi.")
     }
   }
 

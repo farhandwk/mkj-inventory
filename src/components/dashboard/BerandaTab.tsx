@@ -6,6 +6,7 @@ import {
   Download, Loader2, AlertCircle
 } from "lucide-react"
 import Chart from "chart.js/auto"
+import ExcelJS from "exceljs"
 import { createClient } from "@/lib/supabase"
 
 // =========================================================
@@ -20,6 +21,7 @@ type OrderRow = {
   order_items?: {
     qty: number
     product_id: string
+    unit_selling_price?: number | null
     products?: ProductRef | ProductRef[] | null
   }[]
 }
@@ -66,14 +68,13 @@ const num = (v: string | number | null | undefined) => {
   return isNaN(n) ? 0 : n
 }
 
-// Rentang tanggal untuk periode terpilih
 function getRange(periode: Periode, customStart: string, customEnd: string): DateRange {
   const today = toYMD(new Date())
 
   if (periode === 'hari') return { start: today, end: today, days: 1 }
 
   if (periode === 'minggu') {
-    const dow = (parseYMD(today).getDay() + 6) % 7 // Senin = 0
+    const dow = (parseYMD(today).getDay() + 6) % 7
     const start = addDays(today, -dow)
     return { start, end: addDays(start, 6), days: 7 }
   }
@@ -100,8 +101,6 @@ function getRange(periode: Periode, customStart: string, customEnd: string): Dat
   return { start, end, days: diffDays(start, end) + 1 }
 }
 
-// Periode pembanding (periode sebelumnya). Bila periode berjalan belum selesai,
-// pembanding dipotong sepanjang hari yang sudah berjalan agar perbandingannya adil.
 function getPrevRange(periode: Periode, range: DateRange): DateRange {
   const today = toYMD(new Date())
   let start: string
@@ -132,7 +131,6 @@ function getPrevRange(periode: Periode, range: DateRange): DateRange {
   return { start, end, days: diffDays(start, end) + 1 }
 }
 
-// Pembagian sumbu X grafik sesuai periode
 function buildBuckets(periode: Periode, r: DateRange): Bucket[] {
   if (periode === 'hari') {
     return [{ label: shortDate(r.start), from: r.start, to: r.end }]
@@ -170,7 +168,6 @@ function buildBuckets(periode: Periode, r: DateRange): Bucket[] {
   return out
 }
 
-// Persentase perubahan terhadap periode sebelumnya (null bila tidak ada pembanding)
 const pctChange = (cur: number, prev: number) => (prev > 0 ? ((cur - prev) / prev) * 100 : null)
 
 function TrendLine({ pct, suffix }: { pct: number | null; suffix: string }) {
@@ -186,11 +183,10 @@ function TrendLine({ pct, suffix }: { pct: number | null; suffix: string }) {
   )
 }
 
-const csvEscape = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`
-
 export default function BerandaTab() {
-  const supabase = createClient()
+  const supabase = useMemo(() => createClient(), [])
   const [isLoading, setIsLoading] = useState(true)
+  const [isExporting, setIsExporting] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [orders, setOrders] = useState<OrderRow[]>([])
 
@@ -220,6 +216,7 @@ export default function BerandaTab() {
         order_items (
           qty,
           product_id,
+          unit_selling_price,
           products (id, name, unit, selling_price)
         )
       `)
@@ -230,12 +227,11 @@ export default function BerandaTab() {
     }
 
     fetchData()
-  }, [])
+  }, [supabase])
 
   // =========================================================
   // OLAH DATA
   // =========================================================
-  // Baris penjualan dari pesanan selesai + meta semua pesanan (untuk tingkat pemenuhan)
   const { saleLines, orderMeta } = useMemo(() => {
     const lines: { date: string; productId: string; name: string; unit: string; qty: number; price: number }[] = []
     const meta: { date: string; completed: boolean }[] = []
@@ -249,13 +245,18 @@ export default function BerandaTab() {
 
       order.order_items?.forEach(item => {
         const p = Array.isArray(item.products) ? item.products[0] : item.products
+        const lockedPrice =
+          item.unit_selling_price !== undefined && item.unit_selling_price !== null
+            ? num(item.unit_selling_price)
+            : num(p?.selling_price)
+
         lines.push({
           date,
           productId: item.product_id,
           name: p?.name || 'Produk Custom',
           unit: p?.unit || 'Kg',
           qty: num(item.qty),
-          price: num(p?.selling_price)
+          price: lockedPrice
         })
       })
     })
@@ -278,6 +279,7 @@ export default function BerandaTab() {
       }
       row.qty += l.qty
       row.revenue += l.qty * l.price
+      row.price = row.qty > 0 ? row.revenue / row.qty : l.price
       perProductMap.set(l.productId, row)
     })
 
@@ -298,7 +300,6 @@ export default function BerandaTab() {
   const topProduct = cur.perProduct[0]
   const topShare = topProduct && cur.totalRevenue > 0 ? Math.round((topProduct.revenue / cur.totalRevenue) * 100) : 0
 
-  // Data grafik tren omzet per bucket waktu
   const chartData = useMemo(() => {
     const buckets = buildBuckets(periode, range)
     const revenue = buckets.map(b => {
@@ -317,33 +318,239 @@ export default function BerandaTab() {
   }), [cur.perProduct])
 
   // =========================================================
-  // EXPORT RINGKASAN (CSV)
+  // EXPORT RINGKASAN KE EXCEL (.XLSX) RAPI & TERFORMAT
   // =========================================================
-  const handleExportCSV = () => {
-    const rows = [
-      'RINGKASAN KINERJA PENJUALAN - UMKM MIE KURNIA JAYA',
-      `Periode,${csvEscape(PERIODE_LABEL[periode])}`,
-      `Rentang Tanggal,${csvEscape(`${range.start} s/d ${range.end}`)}`,
-      '',
-      'Nama Produk,Jumlah Terjual,Satuan,Harga Satuan (Rp),Total Omzet (Rp)',
-      ...cur.perProduct.map(p =>
-        [csvEscape(p.name), p.qty, csvEscape(p.unit), Math.round(p.price), Math.round(p.revenue)].join(',')
-      ),
-      `${csvEscape('TOTAL')},${cur.totalQty},,,${Math.round(cur.totalRevenue)}`
-    ]
+  const handleExportXLSX = async () => {
+    setIsExporting(true)
+    try {
+      const workbook = new ExcelJS.Workbook()
+      workbook.creator = "Sistem Informasi UMKM Mie Kurnia Jaya"
+      workbook.created = new Date()
 
-    // BOM agar Excel membaca UTF-8 dengan benar
-    const blob = new Blob(["\uFEFF" + rows.join("\n")], { type: "text/csv;charset=utf-8;" })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement("a")
-    link.href = url
-    link.download = "Ringkasan_Penjualan_Kurnia_Jaya.csv"
-    link.click()
-    URL.revokeObjectURL(url)
+      const sheet = workbook.addWorksheet("Ringkasan Penjualan", {
+        views: [{ showGridLines: true }]
+      })
+
+      // Konfigurasi lebar kolom
+      sheet.columns = [
+        { key: "no", width: 7 },
+        { key: "produk", width: 34 },
+        { key: "qty", width: 18 },
+        { key: "satuan", width: 12 },
+        { key: "harga", width: 22 },
+        { key: "omzet", width: 24 },
+        { key: "persen", width: 16 }
+      ]
+
+      const thinBorder: Partial<ExcelJS.Borders> = {
+        top: { style: "thin", color: { argb: "CBD5E1" } },
+        left: { style: "thin", color: { argb: "CBD5E1" } },
+        bottom: { style: "thin", color: { argb: "CBD5E1" } },
+        right: { style: "thin", color: { argb: "CBD5E1" } }
+      }
+
+      // 1. KOP / JUDUL LAPORAN (Baris 1 - 2)
+      sheet.mergeCells("A1:G1")
+      const titleCell = sheet.getCell("A1")
+      titleCell.value = "RINGKASAN KINERJA PENJUALAN — UMKM MIE KURNIA JAYA"
+      titleCell.font = { name: "Calibri", size: 14, bold: true, color: { argb: "FFFFFF" } }
+      titleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "0F172A" } }
+      titleCell.alignment = { vertical: "middle", horizontal: "left", indent: 1 }
+      sheet.getRow(1).height = 30
+
+      sheet.mergeCells("A2:G2")
+      const subtitleCell = sheet.getCell("A2")
+      subtitleCell.value = "Laporan Performa Penjualan & Kontribusi Produk"
+      subtitleCell.font = { name: "Calibri", size: 10, italic: true, color: { argb: "E2E8F0" } }
+      subtitleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "1E293B" } }
+      subtitleCell.alignment = { vertical: "middle", horizontal: "left", indent: 1 }
+      sheet.getRow(2).height = 20
+
+      // 2. INFORMASI PERIODE & RINGKASAN KPI (Baris 4 - 8)
+      const infoRows: [string, string, string, string | number, string?][] = [
+        ["Periode Laporan", `${PERIODE_LABEL[periode]} (${range.start} s/d ${range.end})`, "Total Penjualan (Omzet)", Math.round(cur.totalRevenue), '"Rp" #,##0'],
+        ["Tanggal Ekspor", todayStr, "Total Volume Terjual", cur.totalQty, "#,##0.##"],
+        ["Pesanan Selesai", `${cur.completedOrders} dari ${cur.totalOrders} transaksi (${Math.round(cur.fulfilment)}%)`, "Produk Terlaris", topProduct ? `${topProduct.name} (${topShare}%)` : "-"]
+      ]
+
+      infoRows.forEach((item, idx) => {
+        const rIdx = 4 + idx
+        const row = sheet.getRow(rIdx)
+        row.height = 22
+
+        sheet.mergeCells(`A${rIdx}:B${rIdx}`)
+        sheet.mergeCells(`C${rIdx}:D${rIdx}`)
+
+        const lblLeft = sheet.getCell(`A${rIdx}`)
+        lblLeft.value = item[0]
+        lblLeft.font = { name: "Calibri", size: 10, bold: true, color: { argb: "334155" } }
+        lblLeft.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "F1F5F9" } }
+        lblLeft.alignment = { vertical: "middle", horizontal: "left", indent: 1 }
+
+        const valLeft = sheet.getCell(`C${rIdx}`)
+        valLeft.value = item[1]
+        valLeft.font = { name: "Calibri", size: 10, color: { argb: "0F172A" } }
+        valLeft.alignment = { vertical: "middle", horizontal: "left", indent: 1 }
+
+        const lblRight = sheet.getCell(`F${rIdx}`)
+        lblRight.value = item[2]
+        lblRight.font = { name: "Calibri", size: 10, bold: true, color: { argb: "334155" } }
+        lblRight.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "F1F5F9" } }
+        lblRight.alignment = { vertical: "middle", horizontal: "left", indent: 1 }
+
+        const valRight = sheet.getCell(`G${rIdx}`)
+        valRight.value = item[3]
+        valRight.font = { name: "Calibri", size: 10, bold: true, color: { argb: "0F766E" } }
+        valRight.alignment = { vertical: "middle", horizontal: typeof item[3] === "number" ? "right" : "left", indent: typeof item[3] === "number" ? 0 : 1 }
+        if (item[4]) valRight.numFmt = item[4]
+
+        ;["A", "B", "C", "D", "F", "G"].forEach(col => {
+          sheet.getCell(`${col}${rIdx}`).border = thinBorder
+        })
+      })
+
+      // 3. HEADER TABEL RINCIAN PRODUK (Baris 8)
+      const headerRowIdx = 8
+      const headers = [
+        "No",
+        "Nama Produk",
+        "Jumlah Terjual",
+        "Satuan",
+        "Rata-rata Harga Jual",
+        "Total Omzet",
+        "Kontribusi (%)"
+      ]
+      const headerRow = sheet.getRow(headerRowIdx)
+      headerRow.height = 26
+      headers.forEach((text, i) => {
+        const cell = headerRow.getCell(i + 1)
+        cell.value = text
+        cell.font = { name: "Calibri", size: 10, bold: true, color: { argb: "FFFFFF" } }
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "0E7490" } }
+        cell.alignment = {
+          vertical: "middle",
+          horizontal: i === 0 || i === 3 ? "center" : i === 1 ? "left" : "right"
+        }
+        cell.border = thinBorder
+      })
+
+      // 4. ISI DATA PRODUK
+      const dataStartIdx = headerRowIdx + 1
+      if (cur.perProduct.length === 0) {
+        const emptyRow = sheet.getRow(dataStartIdx)
+        emptyRow.height = 24
+        sheet.mergeCells(`A${dataStartIdx}:G${dataStartIdx}`)
+        const c = sheet.getCell(`A${dataStartIdx}`)
+        c.value = "Belum ada data penjualan selesai pada periode ini."
+        c.font = { name: "Calibri", size: 10, italic: true, color: { argb: "64748B" } }
+        c.alignment = { vertical: "middle", horizontal: "center" }
+        for (let col = 1; col <= 7; col++) {
+          emptyRow.getCell(col).border = thinBorder
+        }
+      } else {
+        cur.perProduct.forEach((p, idx) => {
+          const rIdx = dataStartIdx + idx
+          const row = sheet.getRow(rIdx)
+          row.height = 22
+          const shareFraction = cur.totalRevenue > 0 ? p.revenue / cur.totalRevenue : 0
+
+          row.values = [
+            idx + 1,
+            p.name,
+            p.qty,
+            p.unit,
+            Math.round(p.price),
+            Math.round(p.revenue),
+            shareFraction
+          ]
+
+          const isEven = idx % 2 === 1
+          row.eachCell((cell, colNumber) => {
+            cell.font = {
+              name: "Calibri",
+              size: 10,
+              bold: colNumber === 2 || colNumber === 6,
+              color: { argb: colNumber === 6 ? "047857" : "0F172A" }
+            }
+            if (isEven) {
+              cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "F8FAFC" } }
+            }
+            cell.border = thinBorder
+
+            if (colNumber === 1 || colNumber === 4) {
+              cell.alignment = { vertical: "middle", horizontal: "center" }
+            } else if (colNumber === 2) {
+              cell.alignment = { vertical: "middle", horizontal: "left" }
+            } else {
+              cell.alignment = { vertical: "middle", horizontal: "right" }
+            }
+
+            if (colNumber === 3) cell.numFmt = "#,##0.##"
+            if (colNumber === 5 || colNumber === 6) cell.numFmt = '"Rp" #,##0'
+            if (colNumber === 7) cell.numFmt = "0.0%"
+          })
+        })
+
+        // 5. BARIS TOTAL DENGAN RUMUS EXCEL
+        const dataEndIdx = dataStartIdx + cur.perProduct.length - 1
+        const totalRowIdx = dataEndIdx + 1
+        const totalRow = sheet.getRow(totalRowIdx)
+        totalRow.height = 25
+
+        sheet.mergeCells(`A${totalRowIdx}:B${totalRowIdx}`)
+        sheet.getCell(`A${totalRowIdx}`).value = "TOTAL KESELURUHAN"
+        sheet.getCell(`C${totalRowIdx}`).value = { formula: `SUM(C${dataStartIdx}:C${dataEndIdx})` }
+        sheet.getCell(`D${totalRowIdx}`).value = "-"
+        sheet.getCell(`E${totalRowIdx}`).value = "-"
+        sheet.getCell(`F${totalRowIdx}`).value = { formula: `SUM(F${dataStartIdx}:F${dataEndIdx})` }
+        sheet.getCell(`G${totalRowIdx}`).value = { formula: `SUM(G${dataStartIdx}:G${dataEndIdx})` }
+
+        for (let col = 1; col <= 7; col++) {
+          const cell = totalRow.getCell(col)
+          cell.font = { name: "Calibri", size: 10, bold: true, color: { argb: "0F172A" } }
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "E2E8F0" } }
+          cell.border = {
+            top: { style: "medium", color: { argb: "64748B" } },
+            bottom: { style: "double", color: { argb: "0F172A" } },
+            left: { style: "thin", color: { argb: "CBD5E1" } },
+            right: { style: "thin", color: { argb: "CBD5E1" } }
+          }
+
+          if (col === 1 || col === 2) {
+            cell.alignment = { vertical: "middle", horizontal: "left", indent: 1 }
+          } else if (col === 4 || col === 5) {
+            cell.alignment = { vertical: "middle", horizontal: "center" }
+          } else {
+            cell.alignment = { vertical: "middle", horizontal: "right" }
+          }
+        }
+
+        sheet.getCell(`C${totalRowIdx}`).numFmt = "#,##0.##"
+        sheet.getCell(`F${totalRowIdx}`).numFmt = '"Rp" #,##0'
+        sheet.getCell(`G${totalRowIdx}`).numFmt = "0.0%"
+      }
+
+      // Generate & Download file .xlsx
+      const buffer = await workbook.xlsx.writeBuffer()
+      const blob = new Blob([buffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement("a")
+      link.href = url
+      link.download = `Ringkasan_Penjualan_Kurnia_Jaya_${range.start}_${range.end}.xlsx`
+      link.click()
+      URL.revokeObjectURL(url)
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Terjadi kesalahan saat membuat file Excel."
+      alert(`Gagal mengekspor Excel: ${msg}`)
+    } finally {
+      setIsExporting(false)
+    }
   }
 
   // =========================================================
-  // CHART.JS: buat saat halaman siap, perbarui saat data berubah
+  // CHART.JS
   // =========================================================
   useEffect(() => {
     if (isLoading) return
@@ -484,10 +691,12 @@ export default function BerandaTab() {
 
           <button
             type="button"
-            onClick={handleExportCSV}
-            className="px-3.5 py-2 rounded-xl bg-vision-emerald/20 text-vision-emerald border border-vision-emerald/30 hover:bg-vision-emerald/30 text-xs font-semibold flex items-center gap-1.5 transition-all"
+            disabled={isExporting}
+            onClick={handleExportXLSX}
+            className="px-3.5 py-2 rounded-xl bg-vision-emerald/20 text-vision-emerald border border-vision-emerald/30 hover:bg-vision-emerald/30 text-xs font-semibold flex items-center gap-1.5 transition-all disabled:opacity-50"
           >
-            <Download size={14} /> Export Ringkasan
+            {isExporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+            <span>{isExporting ? "Menyiapkan Excel..." : "Export Excel (.xlsx)"}</span>
           </button>
         </div>
       </div>

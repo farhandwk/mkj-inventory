@@ -25,27 +25,19 @@ export default function SettingTab() {
   const [products, setProducts] = useState<Product[]>([])
   const [recipes, setRecipes] = useState<RecipeMap>({})
 
-  // State CRUD Data Master
+  // State CRUD Data Master + BOM di Form Edit Produk
   const [crudTab, setCrudTab] = useState<CrudType>('product')
   const [modal, setModal] = useState<{ type: CrudType; id: string | null } | null>(null)
   const [form, setForm] = useState({ name: "", unit: "", price: "" })
+  const [modalBom, setModalBom] = useState<Record<string, number>>({})
   const [isCrudSaving, setIsCrudSaving] = useState(false)
-
-  // Palet Warna Dinamis untuk Card Produk
-  const COLOR_CLASSES = [
-    { bg: 'bg-vision-cyan', text: 'text-vision-cyan', border: 'border-vision-cyan', badge: 'bg-vision-cyan/20' },
-    { bg: 'bg-vision-purple', text: 'text-vision-purple', border: 'border-vision-purple', badge: 'bg-vision-purple/20' },
-    { bg: 'bg-vision-amber', text: 'text-vision-amber', border: 'border-vision-amber', badge: 'bg-vision-amber/20' },
-    { bg: 'bg-vision-emerald', text: 'text-vision-emerald', border: 'border-vision-emerald', badge: 'bg-vision-emerald/20' },
-  ]
 
   // 1. FETCH DATA DINAMIS DARI SUPABASE
   useEffect(() => {
     const fetchData = async () => {
       setIsLoading(true)
-      
+
       try {
-        // Fetch semua tabel secara paralel agar lebih cepat
         const [ovRes, matRes, prodRes, recRes] = await Promise.all([
           supabase.from('overhead_costs').select('*').eq('id', 1).single(),
           supabase.from('materials').select('*').order('created_at'),
@@ -60,18 +52,16 @@ export default function SettingTab() {
             z_score_factor: ovRes.data.z_score_factor
           })
         }
-        
+
         if (matRes.data) setMaterials(matRes.data)
         if (prodRes.data) setProducts(prodRes.data)
 
-        // Bangun Object Map untuk Resep
         if (prodRes.data && matRes.data && recRes.data) {
           const newRecipeMap: RecipeMap = {}
-          
+
           prodRes.data.forEach(p => {
             newRecipeMap[p.id] = {}
             matRes.data.forEach(m => {
-              // Cari relasi resep yang cocok, jika tidak ada set 0
               const r = recRes.data.find(x => x.product_id === p.id && x.material_id === m.id)
               newRecipeMap[p.id][m.id] = r ? parseFloat(r.qty_per_kg) : 0
             })
@@ -94,16 +84,13 @@ export default function SettingTab() {
     setIsSaving(true)
 
     try {
-      // A. Update Overhead
       await supabase.from('overhead_costs').update(overhead).eq('id', 1)
 
-      // B. Update Semua Harga Materials
-      const matPromises = materials.map(m => 
+      const matPromises = materials.map(m =>
         supabase.from('materials').update({ price_per_unit: m.price_per_unit }).eq('id', m.id)
       )
       await Promise.all(matPromises)
 
-      // C. Update Resep (Upsert massal)
       const recipeUpserts = []
       for (const pId of Object.keys(recipes)) {
         for (const mId of Object.keys(recipes[pId])) {
@@ -114,8 +101,7 @@ export default function SettingTab() {
           })
         }
       }
-      
-      // Upsert membutuhkan unique constraint (product_id, material_id) yang sudah kita buat di DB
+
       const { error: recipeError } = await supabase
         .from('recipes')
         .upsert(recipeUpserts, { onConflict: 'product_id,material_id' })
@@ -131,53 +117,61 @@ export default function SettingTab() {
     }
   }
 
-  // Helper: Hitung HPP per Produk
-  const hitungHpp = (productId: string) => {
+  // Helper: Hitung HPP per Produk dari recipeMap tertentu (default: state recipes)
+  const hitungHpp = (productId: string, customRecipe?: Record<string, number>) => {
     let total = 0
-    const prodRecipe = recipes[productId]
+    const prodRecipe = customRecipe ?? recipes[productId]
     if (!prodRecipe) return total
 
     materials.forEach(m => {
-      const qty = prodRecipe[m.id] || 0
-      total += (qty * m.price_per_unit)
+      const qty = Number(prodRecipe[m.id] || 0)
+      total += (qty * Number(m.price_per_unit || 0))
     })
     return total
   }
 
-  // Handler Perubahan Input Harga Bahan
   const handlePriceChange = (id: string, newPrice: number) => {
     setMaterials(prev => prev.map(m => m.id === id ? { ...m, price_per_unit: newPrice } : m))
-  }
-
-  // Handler Perubahan Input Resep
-  const handleRecipeChange = (pId: string, mId: string, newQty: number) => {
-    setRecipes(prev => ({
-      ...prev,
-      [pId]: {
-        ...prev[pId],
-        [mId]: newQty
-      }
-    }))
   }
 
   const formatRp = (val: number) => "Rp " + Math.round(val).toLocaleString('id-ID')
 
   // =========================================================
-  // 3. CRUD DATA MASTER (PRODUK & BAHAN BAKU)
+  // 3. CRUD DATA MASTER (PRODUK & BAHAN BAKU) + BOM EDIT PRODUK
   // =========================================================
+  const buildBomDraft = (productId?: string | null) => {
+    const draft: Record<string, number> = {}
+    const activeMats = materials.filter(m => m.is_active !== false)
+    const sourceMats = activeMats.length > 0 ? activeMats : materials
+    sourceMats.forEach(m => {
+      draft[m.id] = productId ? Number(recipes[productId]?.[m.id] ?? 0) : 0
+    })
+    return draft
+  }
+
   const openAdd = (type: CrudType) => {
     setForm({ name: "", unit: type === 'product' ? "Kg" : "", price: "" })
+    setModalBom(type === 'product' ? buildBomDraft(null) : {})
     setModal({ type, id: null })
   }
 
   const openEditProduct = (p: Product) => {
     setForm({ name: p.name, unit: p.unit, price: String(p.selling_price) })
+    setModalBom(buildBomDraft(p.id))
     setModal({ type: 'product', id: p.id })
   }
 
   const openEditMaterial = (m: Material) => {
     setForm({ name: m.name, unit: m.monitoring_unit, price: String(m.price_per_unit) })
+    setModalBom({})
     setModal({ type: 'material', id: m.id })
+  }
+
+  const handleModalBomChange = (materialId: string, val: number) => {
+    setModalBom(prev => ({
+      ...prev,
+      [materialId]: isNaN(val) || val < 0 ? 0 : val
+    }))
   }
 
   const handleCrudSubmit = async (e: React.FormEvent) => {
@@ -192,7 +186,6 @@ export default function SettingTab() {
       return alert("Nama, satuan, dan harga wajib diisi dengan benar!")
     }
 
-    // Cegah nama ganda (tanpa membedakan huruf besar/kecil)
     const list = modal.type === 'product' ? products : materials
     const duplicate = list.some(x => x.id !== modal.id && x.name.trim().toLowerCase() === name.toLowerCase())
     if (duplicate) return alert(`Nama "${name}" sudah dipakai. Gunakan nama lain.`)
@@ -210,16 +203,40 @@ export default function SettingTab() {
         alert(`Gagal menyimpan produk: ${error?.message}`)
       } else {
         const saved = data as Product
+
+        // Susun takaran BOM lengkap untuk semua bahan baku di state recipes
+        const fullProductRecipe: Record<string, number> = {}
+        materials.forEach(m => {
+          fullProductRecipe[m.id] = Number(modalBom[m.id] ?? recipes[saved.id]?.[m.id] ?? 0)
+        })
+
+        const bomRows = Object.entries(fullProductRecipe).map(([material_id, qty_per_kg]) => ({
+          product_id: saved.id,
+          material_id,
+          qty_per_kg
+        }))
+
+        if (bomRows.length > 0) {
+          const { error: bomError } = await supabase
+            .from('recipes')
+            .upsert(bomRows, { onConflict: 'product_id,material_id' })
+
+          if (bomError) {
+            alert(`Produk tersimpan, tetapi gagal menyimpan BOM resep: ${bomError.message}`)
+          }
+        }
+
         if (modal.id) {
           setProducts(prev => prev.map(p => p.id === saved.id ? saved : p))
         } else {
           setProducts(prev => [...prev, saved])
-          // Siapkan baris resep kosong untuk produk baru
-          setRecipes(prev => ({
-            ...prev,
-            [saved.id]: Object.fromEntries(materials.map(m => [m.id, 0]))
-          }))
         }
+
+        setRecipes(prev => ({
+          ...prev,
+          [saved.id]: fullProductRecipe
+        }))
+
         setModal(null)
       }
     } else {
@@ -237,7 +254,6 @@ export default function SettingTab() {
           setMaterials(prev => prev.map(m => m.id === saved.id ? saved : m))
         } else {
           setMaterials(prev => [...prev, saved])
-          // Tambahkan kolom resep kosong untuk bahan baru di setiap produk
           setRecipes(prev => {
             const next: RecipeMap = {}
             Object.keys(prev).forEach(pId => { next[pId] = { ...prev[pId], [saved.id]: 0 } })
@@ -251,10 +267,9 @@ export default function SettingTab() {
     setIsCrudSaving(false)
   }
 
-  // Arsip / aktifkan kembali (soft delete, riwayat data tetap utuh)
   const handleToggleArchive = async (type: CrudType, row: Product | Material) => {
     const table = type === 'product' ? 'products' : 'materials'
-    const nextActive = row.is_active === false // sedang arsip -> aktifkan
+    const nextActive = row.is_active === false
     const { error } = await supabase.from(table).update({ is_active: nextActive }).eq('id', row.id)
 
     if (error) {
@@ -267,7 +282,6 @@ export default function SettingTab() {
     }
   }
 
-  // Hapus permanen produk (diblokir bila pernah terjual)
   const handleDeleteProduct = async (p: Product) => {
     const { count, error: countError } = await supabase
       .from('order_items')
@@ -300,7 +314,6 @@ export default function SettingTab() {
     })
   }
 
-  // Hapus permanen bahan baku (diblokir bila punya riwayat pembelian atau masih dipakai resep)
   const handleDeleteMaterial = async (m: Material) => {
     const { count: batchCount, error: batchError } = await supabase
       .from('inventory_batches')
@@ -325,7 +338,6 @@ export default function SettingTab() {
 
     if (!confirm(`Hapus permanen bahan baku "${m.name}"? Tindakan ini tidak bisa dibatalkan.`)) return
 
-    // Bersihkan baris resep kosong (qty 0) milik bahan ini terlebih dahulu
     const { error: recipeError } = await supabase.from('recipes').delete().eq('material_id', m.id)
     if (recipeError) return alert(`Gagal membersihkan resep bahan: ${recipeError.message}`)
 
@@ -353,10 +365,13 @@ export default function SettingTab() {
   }
 
   const crudInputClass = "w-full px-4 py-3 rounded-xl bg-background border border-border text-foreground font-semibold focus:border-vision-cyan outline-none"
+  const activeMaterialsForBom = materials.filter(m => m.is_active !== false)
+  const bomMaterials = activeMaterialsForBom.length > 0 ? activeMaterialsForBom : materials
+  const modalHppPreview = hitungHpp(modal?.id || '', modalBom)
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      
+
       {/* Header Setting */}
       <div className="vision-glass p-5 rounded-3xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-xl">
         <div className="flex items-center gap-4">
@@ -374,15 +389,15 @@ export default function SettingTab() {
         </div>
 
         <div className="flex items-center gap-3">
-          <button 
-            type="button" 
+          <button
+            type="button"
             onClick={() => window.location.reload()}
             className="px-4 py-2.5 rounded-xl bg-muted hover:bg-muted/80 text-foreground font-semibold text-xs transition-all flex items-center gap-2 border border-border"
           >
             <RotateCcw size={14} /> Refresh Data
           </button>
-          <button 
-            type="button" 
+          <button
+            type="button"
             onClick={handleSaveSettings}
             disabled={isSaving}
             className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-vision-cyan via-vision-blue to-vision-purple text-white font-extrabold text-xs transition-all flex items-center gap-2 shadow-glow-cyan hover:opacity-95 disabled:opacity-50"
@@ -393,139 +408,75 @@ export default function SettingTab() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        
-        {/* Kolom Kiri: Parameter EWS & Harga Bahan Baku */}
-        <div className="lg:col-span-4 space-y-6">
-          
-          {/* Card Parameter EWS */}
-          <div className="vision-glass p-6 rounded-3xl space-y-4 shadow-xl">
-            <div className="border-b border-border pb-3 flex items-center gap-2">
-              <Calculator className="text-vision-amber" size={18} />
-              <h3 className="text-base font-bold text-foreground">Ketentuan Parameter EWS</h3>
+      {/* Grid Parameter EWS & Daftar Bahan Baku */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+
+        {/* Card Parameter EWS */}
+        <div className="vision-glass p-6 rounded-3xl space-y-4 shadow-xl">
+          <div className="border-b border-border pb-3 flex items-center gap-2">
+            <Calculator className="text-vision-amber" size={18} />
+            <h3 className="text-base font-bold text-foreground">Ketentuan Parameter EWS</h3>
+          </div>
+          <div className="space-y-3 text-xs">
+            <div>
+              <label className="font-semibold text-muted-foreground block mb-1">Biaya Pesan (S) per Pesanan</label>
+              <input
+                type="number"
+                value={overhead.order_cost}
+                onChange={(e) => setOverhead({...overhead, order_cost: Number(e.target.value)})}
+                className="w-full px-4 py-2.5 rounded-xl bg-background border border-border text-foreground font-bold focus:border-vision-cyan outline-none"
+              />
             </div>
-            <div className="space-y-3 text-xs">
-              <div>
-                <label className="font-semibold text-muted-foreground block mb-1">Biaya Pesan (S) per Pesanan</label>
-                <input 
-                  type="number" 
-                  value={overhead.order_cost} 
-                  onChange={(e) => setOverhead({...overhead, order_cost: Number(e.target.value)})}
-                  className="w-full px-4 py-2.5 rounded-xl bg-background border border-border text-foreground font-bold focus:border-vision-cyan outline-none" 
-                />
-              </div>
-              <div>
-                <label className="font-semibold text-muted-foreground block mb-1">Biaya Simpan (H) per Unit/Periode</label>
-                <input 
-                  type="number" 
-                  value={overhead.holding_cost} 
-                  onChange={(e) => setOverhead({...overhead, holding_cost: Number(e.target.value)})}
-                  className="w-full px-4 py-2.5 rounded-xl bg-background border border-border text-foreground font-bold focus:border-vision-cyan outline-none" 
-                />
-              </div>
-              <div>
-                <label className="font-semibold text-muted-foreground block mb-1">Tingkat Pelayanan (Z-Score Factor)</label>
-                <select 
-                  value={overhead.z_score_factor} 
-                  onChange={(e) => setOverhead({...overhead, z_score_factor: Number(e.target.value)})}
-                  className="w-full px-3 py-2.5 rounded-xl bg-background border border-border text-foreground font-semibold focus:border-vision-cyan outline-none"
-                >
-                  <option value={1.65}>95% (Z = 1.65)</option>
-                  <option value={1.96}>97.5% (Z = 1.96)</option>
-                  <option value={2.33}>99% (Z = 2.33)</option>
-                </select>
-              </div>
+            <div>
+              <label className="font-semibold text-muted-foreground block mb-1">Biaya Simpan (H) per Unit/Periode</label>
+              <input
+                type="number"
+                value={overhead.holding_cost}
+                onChange={(e) => setOverhead({...overhead, holding_cost: Number(e.target.value)})}
+                className="w-full px-4 py-2.5 rounded-xl bg-background border border-border text-foreground font-bold focus:border-vision-cyan outline-none"
+              />
+            </div>
+            <div>
+              <label className="font-semibold text-muted-foreground block mb-1">Tingkat Pelayanan (Z-Score Factor)</label>
+              <select
+                value={overhead.z_score_factor}
+                onChange={(e) => setOverhead({...overhead, z_score_factor: Number(e.target.value)})}
+                className="w-full px-3 py-2.5 rounded-xl bg-background border border-border text-foreground font-semibold focus:border-vision-cyan outline-none"
+              >
+                <option value={1.65}>95% (Z = 1.65)</option>
+                <option value={1.96}>97.5% (Z = 1.96)</option>
+                <option value={2.33}>99% (Z = 2.33)</option>
+              </select>
             </div>
           </div>
-
-          {/* Card Harga Satuan Bahan Baku */}
-          <div className="vision-glass p-6 rounded-3xl space-y-4 shadow-xl">
-            <div className="border-b border-border pb-3 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Coins className="text-vision-amber" size={18} />
-                <h3 className="text-base font-bold text-foreground">Daftar Bahan Baku</h3>
-              </div>
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-vision-cyan/20 text-vision-cyan border border-vision-cyan/30">Live HPP</span>
-            </div>
-            
-            {/* Render Bahan Baku Dinamis */}
-            <div className="space-y-3 text-xs">
-              {materials.map(mat => (
-                <div key={mat.id}>
-                  <label className="font-semibold text-muted-foreground flex justify-between mb-1">
-                    <span>{mat.name}</span> 
-                    <span className="text-[10px]">Rp / {mat.monitoring_unit}</span>
-                  </label>
-                  <input 
-                    type="number" 
-                    value={mat.price_per_unit} 
-                    onChange={(e) => handlePriceChange(mat.id, Number(e.target.value))}
-                    className="w-full px-3 py-2 rounded-xl bg-background border border-border text-foreground font-bold outline-none focus:border-vision-cyan" 
-                  />
-                </div>
-              ))}
-            </div>
-          </div>
-
         </div>
 
-        {/* Kolom Kanan: Takaran Resep Produk (Dinamis) */}
-        <div className="lg:col-span-8 vision-glass p-6 rounded-3xl space-y-6 shadow-xl">
-          <div className="border-b border-border pb-4">
-            <h3 className="text-base font-bold text-foreground flex items-center gap-2">
-              <Utensils className="text-vision-cyan" size={18} /> Takaran Bill of Materials (BOM) per Produk
-            </h3>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              Atur komposisi standar adonan. Nilai HPP akan dihitung otomatis sesuai harga satuan per unit monitoring bahan baku.
-            </p>
+        {/* Card Harga Satuan Bahan Baku */}
+        <div className="vision-glass p-6 rounded-3xl space-y-4 shadow-xl">
+          <div className="border-b border-border pb-3 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Coins className="text-vision-amber" size={18} />
+              <h3 className="text-base font-bold text-foreground">Daftar Bahan Baku</h3>
+            </div>
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-vision-cyan/20 text-vision-cyan border border-vision-cyan/30">Live HPP</span>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            
-            {/* Render Produk Dinamis (produk yang diarsipkan tidak ditampilkan) */}
-            {products.filter(p => p.is_active !== false).map((prod, index) => {
-              const color = COLOR_CLASSES[index % COLOR_CLASSES.length] // Cycle warna
-              
-              return (
-                <div key={prod.id} className={`p-4 rounded-2xl bg-background/50 border border-border space-y-4 hover:border-${color.border}/50 transition-colors`}>
-                  
-                  <div className="flex items-center justify-between border-b border-border/50 pb-2">
-                    <h4 className="font-bold text-foreground text-xs flex items-center gap-2">
-                      <span className={`w-2 h-2 rounded-full ${color.bg}`} /> {prod.name}
-                    </h4>
-                    <span className={`text-[10px] ${color.text} ${color.badge} px-2 py-0.5 rounded-full font-semibold`}>
-                      1 {prod.unit} Output
-                    </span>
-                  </div>
-
-                  {/* Render Input Resep Dinamis berdasarkan Daftar Bahan Baku */}
-                  <div className="grid grid-cols-2 gap-3 text-xs">
-                    {materials.map(mat => (
-                      <div key={mat.id}>
-                        <label className="text-[10px] text-muted-foreground block mb-1 truncate" title={mat.name}>
-                          {mat.name} ({mat.monitoring_unit})
-                        </label>
-                        <input 
-                          type="number" 
-                          step="0.01" 
-                          value={recipes[prod.id]?.[mat.id] || 0} 
-                          onChange={(e) => handleRecipeChange(prod.id, mat.id, Number(e.target.value))} 
-                          className="w-full px-3 py-1.5 rounded-lg bg-background border border-border text-center font-bold" 
-                        />
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="pt-3 border-t border-border/55 flex justify-between items-center text-xs font-bold text-vision-amber">
-                    <span>HPP Bahan / {prod.unit}:</span>
-                    <span>{formatRp(hitungHpp(prod.id))}</span>
-                  </div>
-                  
-                </div>
-              )
-            })}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+            {materials.map(mat => (
+              <div key={mat.id}>
+                <label className="font-semibold text-muted-foreground flex justify-between mb-1">
+                  <span className="truncate pr-2" title={mat.name}>{mat.name}</span>
+                  <span className="text-[10px] shrink-0">Rp / {mat.monitoring_unit}</span>
+                </label>
+                <input
+                  type="number"
+                  value={mat.price_per_unit}
+                  onChange={(e) => handlePriceChange(mat.id, Number(e.target.value))}
+                  className="w-full px-3 py-2 rounded-xl bg-background border border-border text-foreground font-bold outline-none focus:border-vision-cyan"
+                />
+              </div>
+            ))}
           </div>
-
         </div>
 
       </div>
@@ -540,7 +491,7 @@ export default function SettingTab() {
               <Package className="text-vision-cyan" size={18} /> Kelola Data Master Produk & Bahan Baku
             </h3>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Tambah, ubah, arsipkan, atau hapus data master. Data yang sudah punya riwayat sebaiknya diarsipkan, bukan dihapus.
+              Tambah, ubah (termasuk BOM resep produk), arsipkan, atau hapus data master. Data yang sudah punya riwayat sebaiknya diarsipkan, bukan dihapus.
             </p>
           </div>
 
@@ -611,7 +562,7 @@ export default function SettingTab() {
                         </td>
                         <td className="py-3 px-3">
                           <div className="flex items-center justify-center gap-1.5">
-                            <button type="button" onClick={() => openEditProduct(p)} title="Ubah" className="p-1.5 rounded-lg bg-vision-blue/20 text-vision-blue hover:bg-vision-blue/30">
+                            <button type="button" onClick={() => openEditProduct(p)} title="Ubah & Atur BOM" className="p-1.5 rounded-lg bg-vision-blue/20 text-vision-blue hover:bg-vision-blue/30">
                               <Pencil size={13} />
                             </button>
                             <button type="button" onClick={() => handleToggleArchive('product', p)} title={archived ? 'Aktifkan kembali' : 'Arsipkan'} className="p-1.5 rounded-lg bg-vision-amber/20 text-vision-amber hover:bg-vision-amber/30">
@@ -684,11 +635,11 @@ export default function SettingTab() {
       </div>
 
       {/* ========================================= */}
-      {/* MODAL TAMBAH / UBAH DATA MASTER */}
+      {/* MODAL TAMBAH / UBAH DATA MASTER + BOM PRODUK */}
       {/* ========================================= */}
       {modal && (
         <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200">
-          <div className="vision-glass w-full max-w-lg rounded-3xl p-6 sm:p-8 border border-border/50 shadow-2xl relative space-y-5 animate-in zoom-in-95 duration-200">
+          <div className="vision-glass w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl p-6 sm:p-8 border border-border/50 shadow-2xl relative space-y-5 animate-in zoom-in-95 duration-200">
 
             <div className="flex items-center justify-between border-b border-border pb-3">
               <div className="flex items-center gap-3">
@@ -697,11 +648,11 @@ export default function SettingTab() {
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-foreground">
-                    {modal.id ? 'Ubah' : 'Tambah'} {modal.type === 'product' ? 'Produk' : 'Bahan Baku'}
+                    {modal.id ? 'Ubah' : 'Tambah'} {modal.type === 'product' ? 'Produk & BOM' : 'Bahan Baku'}
                   </h3>
                   <p className="text-xs text-muted-foreground">
                     {modal.type === 'product'
-                      ? 'Produk jadi yang dijual ke pelanggan.'
+                      ? 'Atur identitas produk sekaligus takaran Bill of Materials (BOM) per unit.'
                       : 'Bahan baku yang dipakai dalam resep dan dipantau stoknya.'}
                   </p>
                 </div>
@@ -757,11 +708,57 @@ export default function SettingTab() {
                 </div>
               </div>
 
+              {/* FITUR BOM (BILL OF MATERIAL) DI DALAM FORM PRODUK */}
+              {modal.type === 'product' && (
+                <div className="p-4 rounded-2xl bg-background/60 border border-border space-y-3">
+                  <div className="flex items-center justify-between border-b border-border/60 pb-2">
+                    <div>
+                      <h4 className="font-bold text-foreground flex items-center gap-1.5">
+                        <Utensils size={14} className="text-vision-cyan" /> Bill of Materials (BOM) per {form.unit || 'Unit'}
+                      </h4>
+                      <p className="text-[11px] text-muted-foreground">
+                        Isi takaran bahan baku yang dibutuhkan untuk memproduksi 1 {form.unit || 'unit'}.
+                      </p>
+                    </div>
+                    <span className="text-[11px] font-bold text-vision-amber shrink-0 ml-2">
+                      HPP: {formatRp(modalHppPreview)}
+                    </span>
+                  </div>
+
+                  {bomMaterials.length === 0 ? (
+                    <p className="text-xs text-muted-foreground italic py-2">
+                      Belum ada data bahan baku aktif.
+                    </p>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-56 overflow-y-auto pr-1">
+                      {bomMaterials.map(mat => (
+                        <div key={mat.id} className="p-2.5 rounded-xl bg-background border border-border/70 flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="font-semibold text-foreground truncate" title={mat.name}>{mat.name}</p>
+                            <p className="text-[10px] text-muted-foreground">
+                              Satuan: {mat.monitoring_unit} • {formatRp(mat.price_per_unit)}/{mat.monitoring_unit}
+                            </p>
+                          </div>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={modalBom[mat.id] ?? 0}
+                            onChange={e => handleModalBomChange(mat.id, parseFloat(e.target.value))}
+                            className="w-24 px-2.5 py-1.5 rounded-lg bg-muted/40 border border-border text-right font-bold text-foreground focus:border-vision-cyan outline-none shrink-0"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {modal.id && (
                 <p className="text-[11px] text-vision-amber leading-relaxed">
                   {modal.type === 'product'
-                    ? 'Perhatian: mengubah harga jual juga mengubah nilai pendapatan pesanan lama di laporan keuangan, karena harga tidak disimpan per pesanan.'
-                    : 'Perhatian: mengubah harga atau satuan bahan juga mengubah HPP historis di laporan keuangan.'}
+                    ? 'Perubahan harga jual dan BOM akan berlaku pada pesanan baru yang dibuat setelah perubahan ini, sedangkan riwayat pesanan lama tetap memakai harga/HPP saat pesanan tersebut dibuat.'
+                    : 'Perubahan harga atau satuan bahan akan berlaku pada perhitungan HPP pesanan baru yang dibuat setelah perubahan ini.'}
                 </p>
               )}
 
