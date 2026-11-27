@@ -7,6 +7,50 @@ import { createClient } from "@/lib/supabase"
 type ProductOption = { id: string; name: string; unit: string }
 type MaterialOption = { id: string; name: string; monitoring_unit: string }
 
+type UnitConversion = {
+  inputUnit: string
+  multiplier: number
+  hint: string
+}
+
+function getMaterialConversion(material?: MaterialOption): UnitConversion {
+  if (!material) {
+    return { inputUnit: "Unit", multiplier: 1, hint: "" }
+  }
+
+  const normalized = material.name.trim().toLowerCase()
+
+  if (normalized.includes("telur")) {
+    return {
+      inputUnit: "Palet",
+      multiplier: 30,
+      hint: `1 Palet = 30 ${material.monitoring_unit}`
+    }
+  }
+
+  if (normalized.includes("tepung")) {
+    return {
+      inputUnit: "Karung",
+      multiplier: 25,
+      hint: `1 Karung = 25 ${material.monitoring_unit}`
+    }
+  }
+
+  if (normalized.includes("air")) {
+    return {
+      inputUnit: "Galon",
+      multiplier: 19,
+      hint: `1 Galon = 19 ${material.monitoring_unit}`
+    }
+  }
+
+  return {
+    inputUnit: material.monitoring_unit,
+    multiplier: 1,
+    hint: `Satuan langsung (${material.monitoring_unit})`
+  }
+}
+
 export default function OperatorInputTab() {
   const supabase = useMemo(() => createClient(), [])
   const [products, setProducts] = useState<ProductOption[]>([])
@@ -48,6 +92,22 @@ export default function OperatorInputTab() {
     }
     loadOptions()
   }, [supabase])
+
+  const selectedMaterial = useMemo(
+    () => materials.find(m => m.id === materialForm.material_id),
+    [materials, materialForm.material_id]
+  )
+
+  const conversion = useMemo(
+    () => getMaterialConversion(selectedMaterial),
+    [selectedMaterial]
+  )
+
+  const parsedInputQty = parseFloat(materialForm.qty)
+  const convertedQty =
+    !Number.isNaN(parsedInputQty) && parsedInputQty > 0
+      ? Number((parsedInputQty * conversion.multiplier).toFixed(4))
+      : 0
 
   const handleOrderSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -99,10 +159,11 @@ export default function OperatorInputTab() {
 
   const handleMaterialSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    const parsedQty = parseFloat(materialForm.qty)
-    if (!materialForm.material_id || Number.isNaN(parsedQty) || parsedQty <= 0 || !materialForm.order_date) {
+    if (!materialForm.material_id || Number.isNaN(parsedInputQty) || parsedInputQty <= 0 || !materialForm.order_date) {
       return alert("Lengkapi bahan baku, jumlah (> 0), dan tanggal pesan.")
     }
+
+    const dbQty = Number((parsedInputQty * conversion.multiplier).toFixed(4))
 
     setSubmittingMaterial(true)
     setStatusMessage(null)
@@ -111,8 +172,8 @@ export default function OperatorInputTab() {
       .from('inventory_batches')
       .insert({
         material_id: materialForm.material_id,
-        initial_qty: parsedQty,
-        qty: parsedQty,
+        initial_qty: dbQty,
+        qty: dbQty,
         order_date: materialForm.order_date,
         arrival_date: materialForm.arrival_date || null,
         supplier: materialForm.supplier?.trim() || null,
@@ -123,6 +184,7 @@ export default function OperatorInputTab() {
     if (error) {
       alert(`Gagal menyimpan input bahan baku: ${error.message}`)
     } else {
+      const baseUnit = selectedMaterial?.monitoring_unit || ""
       setMaterialForm({
         material_id: "",
         qty: "",
@@ -130,7 +192,9 @@ export default function OperatorInputTab() {
         arrival_date: "",
         supplier: ""
       })
-      setStatusMessage("Input bahan baku berhasil disimpan dan menunggu verifikasi.")
+      setStatusMessage(
+        `Input bahan baku tersimpan (${parsedInputQty} ${conversion.inputUnit} = ${dbQty.toLocaleString('id-ID')} ${baseUnit}).`
+      )
     }
   }
 
@@ -138,7 +202,7 @@ export default function OperatorInputTab() {
     return (
       <div className="flex flex-col items-center justify-center h-[50vh] space-y-3 text-vision-cyan">
         <Loader2 className="w-8 h-8 animate-spin" />
-        <p className="text-xs font-bold animate-pulse">Memuat Form Input Operator...</p>
+        <p className="text-xs font-bold animate-pulse">Memuat Form Input...</p>
       </div>
     )
   }
@@ -272,29 +336,45 @@ export default function OperatorInputTab() {
                 <select
                   required
                   value={materialForm.material_id}
-                  onChange={e => setMaterialForm({ ...materialForm, material_id: e.target.value })}
+                  onChange={e => setMaterialForm({ ...materialForm, material_id: e.target.value, qty: "" })}
                   className="w-full px-4 py-3 rounded-xl bg-background border border-border text-foreground font-semibold focus:border-vision-cyan outline-none"
                 >
                   <option value="" disabled>-- Pilih Bahan Baku --</option>
-                  {materials.map(m => (
-                    <option key={m.id} value={m.id}>{m.name} ({m.monitoring_unit})</option>
-                  ))}
+                  {materials.map(m => {
+                    const conv = getMaterialConversion(m)
+                    return (
+                      <option key={m.id} value={m.id}>
+                        {m.name} ({conv.inputUnit} → {m.monitoring_unit})
+                      </option>
+                    )
+                  })}
                 </select>
               </div>
               <div className="space-y-1.5">
-                <label className="font-semibold text-foreground">Jumlah</label>
+                <label className="font-semibold text-foreground">
+                  Jumlah ({conversion.inputUnit})
+                </label>
                 <input
                   type="number"
                   required
                   min="0.01"
                   step="0.01"
-                  placeholder="Contoh: 100"
+                  placeholder={conversion.inputUnit === "Palet" ? "Contoh: 2" : "Contoh: 10"}
                   value={materialForm.qty}
                   onChange={e => setMaterialForm({ ...materialForm, qty: e.target.value })}
                   className="w-full px-4 py-3 rounded-xl bg-background border border-border text-foreground font-bold focus:border-vision-cyan outline-none"
                 />
               </div>
             </div>
+
+            {selectedMaterial && (
+              <div className="px-3.5 py-2.5 rounded-xl bg-vision-cyan/10 border border-vision-cyan/25 text-vision-cyan flex flex-wrap items-center justify-between gap-2 text-[11px] font-semibold">
+                <span>Konversi: {conversion.hint}</span>
+                <span>
+                  Tersimpan ke DB: <strong>{convertedQty.toLocaleString('id-ID')} {selectedMaterial.monitoring_unit}</strong>
+                </span>
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
