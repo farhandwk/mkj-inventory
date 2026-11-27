@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 import { createClient } from "@/lib/supabase"
 import { useTheme } from "next-themes"
 import { Eye, EyeOff, Soup, ArrowRight, UserPlus, LogIn, Sun, Moon } from "lucide-react"
+import Image from "next/image"
 
 export default function AuthPage() {
   const [activeTab, setActiveTab] = useState<'login' | 'register'>('login')
@@ -91,8 +92,14 @@ export default function AuthPage() {
 
       {/* Header Kecil */}
       <header className="w-full max-w-[1600px] mx-auto px-6 py-5 flex items-center gap-3 relative z-10">
-        <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-vision-cyan via-vision-blue to-vision-purple flex items-center justify-center shadow-glow-cyan text-white">
-          <Soup size={24} />
+        <div className="p-1 w-11 h-11 rounded-2xl bg-gradient-to-tr from-vision-cyan via-vision-blue to-vision-purple flex items-center justify-center shadow-glow-cyan text-white">
+          <Image
+                          src="/logo-mkj.png"
+                          alt="logo Mie Kurnia Jaya"
+                          width={34}
+                          height={34}
+                          className="w-full h-full object-contain"
+                        />
         </div>
         <span className="font-extrabold text-xl tracking-tight leading-none text-foreground">MIE KURNIA JAYA</span>
       </header>
